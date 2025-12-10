@@ -63,13 +63,13 @@ class ExcelExporter:
             print("  📄 Создание листа 'Все запросы'...")
             create_all_queries_sheet(df, writer, self.formats, group_by_clusters)
             
-            # Лист 2: Коммерческие кластеры
-            print("  📄 Создание листа 'Коммерческие кластеры'...")
-            create_intent_filtered_sheet(df, writer, self.formats, 'commercial', group_by_clusters)
-            
-            # Лист 3: Информационные кластеры
-            print("  📄 Создание листа 'Информационные кластеры'...")
-            create_intent_filtered_sheet(df, writer, self.formats, 'informational', group_by_clusters)
+            # Листы кластеров: каждый кластер на отдельном листе
+            # Классификация по коммерческим факторам из SERP (домены + offer)
+            # Если сумма факторов >= 12, кластер считается коммерческим
+            if 'semantic_cluster_id' in df.columns:
+                print("  📄 Создание листов кластеров (каждый кластер на отдельном листе)...")
+                from .writers.cluster_sheets_writer import create_cluster_sheets
+                create_cluster_sheets(df, writer, self.formats, commercial_threshold=12)
             
             # ОТКЛЮЧЕНО: Лист 2: Топ запросы по priority_score
             # if 'priority_score' in df.columns:

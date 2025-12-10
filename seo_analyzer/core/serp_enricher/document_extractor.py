@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 from typing import Dict, List, Any
 from urllib.parse import urlparse
 import re
+import json
 
 from ..xml_text_extractor import XMLTextExtractor
 
@@ -68,6 +69,59 @@ def is_info_domain(domain: str, info_patterns: list = None) -> bool:
     
     domain_lower = domain.lower()
     return any(re.search(pattern, domain_lower) for pattern in info_patterns)
+
+
+def extract_offer_info(group: ET.Element, doc: ET.Element, domain: str, position: int, title: str, url: str) -> List[Dict[str, Any]]:
+    """
+    Извлечь offer_info из группы XML (включая из <properties>)
+    
+    Если в группе есть offer_info (в том числе внутри <properties>), создаём объект offer 
+    с данными документа и полным содержимым offer_info JSON.
+    
+    Args:
+        group: Элемент group из XML
+        doc: Элемент doc из группы
+        domain: Домен документа
+        position: Позиция документа в выдаче
+        title: Заголовок документа
+        url: URL документа
+        
+    Returns:
+        Список объектов offer (обычно один объект если есть offer_info, иначе пустой список)
+        Каждый объект содержит: domain, position, is_commercial, title, url и все данные из offer_info JSON
+    """
+    offers = []
+    
+    # Ищем все offer_info элементы в группе (включая внутри <properties>)
+    # Используем .// для поиска на любом уровне вложенности
+    offer_info_elems = group.findall('.//offer_info')
+    
+    # Если есть хотя бы один offer_info, создаём объект offer
+    if offer_info_elems:
+        offer = {
+            'domain': domain,
+            'position': position,
+            'is_commercial': True,  # Если есть offer_info, значит коммерческий
+            'title': title,
+            'url': url
+        }
+        
+        # Извлекаем данные из первого offer_info (обычно он один)
+        if offer_info_elems[0].text:
+            try:
+                # Парсим весь JSON из offer_info
+                offer_data = json.loads(offer_info_elems[0].text)
+                if isinstance(offer_data, dict):
+                    # Сохраняем все данные из offer_info в объект offer
+                    # Это включает: availability, barometer, price, model_id, product_id и т.д.
+                    offer.update(offer_data)
+            except (json.JSONDecodeError, TypeError) as e:
+                # Если не удалось распарсить JSON, сохраняем как строку
+                offer['offer_info_raw'] = offer_info_elems[0].text
+        
+        offers.append(offer)
+    
+    return offers
 
 
 def extract_documents(
@@ -153,6 +207,9 @@ def extract_documents(
         # Определяем коммерческий ли домен (для статистики, не влияет на main_intent)
         is_commercial = is_commercial_domain(domain, commercial_patterns)
         
+        # Извлекаем offer_info из группы
+        offers = extract_offer_info(group, doc, domain, position, title, url)
+        
         documents.append({
             'position': position,
             'url': url,
@@ -161,7 +218,8 @@ def extract_documents(
             'snippet': snippet,
             'extended_text': extended_text,
             'passages': passages,
-            'is_commercial': is_commercial
+            'is_commercial': is_commercial,
+            'offer': offers  # Добавляем массив offer_info
         })
         
         position += 1

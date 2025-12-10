@@ -124,7 +124,8 @@ def refill_snippets_for_group(group_name: str):
                         'title': doc.get('title', ''),
                         'snippet': doc.get('snippet', ''),
                         'passages': doc.get('passages', ''),
-                        'is_commercial': doc.get('is_commercial', False)
+                        'is_commercial': doc.get('is_commercial', False),
+                        'offer': doc.get('offer', [])  # Добавляем массив offer_info
                     })
                 
                 top_urls_json = json.dumps(top_urls, ensure_ascii=False)
