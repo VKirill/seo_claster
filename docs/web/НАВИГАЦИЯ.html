@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Навигация - SEO Cluster Manager</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 20px;
+      padding: 40px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    }
+
+    h1 {
+      text-align: center;
+      color: #667eea;
+      font-size: 42px;
+      margin-bottom: 15px;
+    }
+
+    .subtitle {
+      text-align: center;
+      color: #666;
+      font-size: 18px;
+      margin-bottom: 40px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 25px;
+      margin-bottom: 30px;
+    }
+
+    .card {
+      background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+      padding: 25px;
+      border-radius: 15px;
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+      transition: all 0.3s;
+      cursor: pointer;
+    }
+
+    .card:hover {
+      transform: translateY(-5px);
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+    }
+
+    .card-icon {
+      font-size: 48px;
+      margin-bottom: 15px;
+    }
+
+    .card-title {
+      font-size: 22px;
+      font-weight: bold;
+      color: #333;
+      margin-bottom: 10px;
+    }
+
+    .card-desc {
+      font-size: 14px;
+      color: #666;
+      line-height: 1.6;
+      margin-bottom: 15px;
+    }
+
+    .card-btn {
+      display: inline-block;
+      background: #667eea;
+      color: white;
+      padding: 10px 20px;
+      border-radius: 25px;
+      text-decoration: none;
+      font-weight: bold;
+      transition: all 0.3s;
+    }
+
+    .card-btn:hover {
+      background: #5568d3;
+      transform: translateX(5px);
+    }
+
+    .section-title {
+      font-size: 28px;
+      color: #667eea;
+      margin: 40px 0 25px 0;
+      padding-bottom: 10px;
+      border-bottom: 3px solid #667eea;
+    }
+
+    .quick-links {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 15px;
+      margin: 30px 0;
+    }
+
+    .quick-link {
+      display: inline-block;
+      background: #667eea;
+      color: white;
+      padding: 15px 30px;
+      border-radius: 25px;
+      text-decoration: none;
+      font-weight: bold;
+      transition: all 0.3s;
+      box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
+    }
+
+    .quick-link:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 8px 20px rgba(102, 126, 234, 0.5);
+    }
+
+    .quick-link.success {
+      background: #28a745;
+    }
+
+    .quick-link.warning {
+      background: #ffc107;
+      color: #333;
+    }
+
+    .quick-link.info {
+      background: #17a2b8;
+    }
+
+    .status {
+      text-align: center;
+      padding: 20px;
+      background: #d4edda;
+      border-radius: 10px;
+      color: #155724;
+      font-weight: bold;
+      margin-bottom: 30px;
+    }
+
+    .file-list {
+      background: #f8f9fa;
+      padding: 20px;
+      border-radius: 10px;
+      margin: 20px 0;
+    }
+
+    .file-item {
+      padding: 10px;
+      border-bottom: 1px solid #ddd;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .file-item:last-child {
+      border-bottom: none;
+    }
+
+    .file-name {
+      font-weight: bold;
+      color: #667eea;
+    }
+
+    .file-desc {
+      color: #666;
+      font-size: 14px;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 5px 10px;
+      border-radius: 5px;
+      font-size: 12px;
+      font-weight: bold;
+      margin-left: 10px;
+    }
+
+    .badge-primary {
+      background: #667eea;
+      color: white;
+    }
+
+    .badge-success {
+      background: #28a745;
+      color: white;
+    }
+
+    .badge-info {
+      background: #17a2b8;
+      color: white;
+    }
+
+    .badge-warning {
+      background: #ffc107;
+      color: #333;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <h1>🗺️ Навигация</h1>
+    <div class="subtitle">SEO Cluster Manager - Все ресурсы в одном месте</div>
+
+    <div class="status">
+      ✅ Веб-интерфейс успешно создан и готов к использованию!
+    </div>
+
+    <!-- Быстрые действия -->
+    <div class="quick-links">
+      <a href="#" class="quick-link success" onclick="launchManager(); return false;">
+        🚀 Запустить менеджер
+      </a>
+      <a href="index.html" class="quick-link" target="_blank">
+        🌐 Открыть интерфейс
+      </a>
+      <a href="ИНСТРУКЦИЯ.html" class="quick-link info">
+        📖 Инструкция
+      </a>
+      <a href="demo.html" class="quick-link warning">
+        🎨 Демо
+      </a>
+    </div>
+
+    <!-- Основные файлы -->
+    <h2 class="section-title">📦 Основные файлы</h2>
+
+    <div class="grid">
+      <div class="card" onclick="openFile('index.html')">
+        <div class="card-icon">🌐</div>
+        <div class="card-title">index.html</div>
+        <div class="card-desc">
+          Главный веб-интерфейс с современным дизайном, drag & drop
+          и мониторингом в реальном времени.
+        </div>
+        <a href="index.html" class="card-btn" target="_blank">Открыть →</a>
+      </div>
+
+      <div class="card" onclick="openFile('start_manager.bat')">
+        <div class="card-icon">🚀</div>
+        <div class="card-title">start_manager.bat</div>
+        <div class="card-desc">
+          Быстрый запуск PHP сервера. Просто дважды кликните для
+          запуска веб-интерфейса.
+        </div>
+        <a href="start_manager.bat" class="card-btn">Запустить →</a>
+      </div>
+
+      <div class="card" onclick="openFile('СТАРТ.bat')">
+        <div class="card-icon">📋</div>
+        <div class="card-title">СТАРТ.bat</div>
+        <div class="card-desc">
+          Интерактивное меню с выбором действий: запуск, инструкция,
+          демо, список файлов.
+        </div>
+        <a href="СТАРТ.bat" class="card-btn">Открыть меню →</a>
+      </div>
+
+      <div class="card" onclick="openFile('api.php')">
+        <div class="card-icon">⚙️</div>
+        <div class="card-title">api.php</div>
+        <div class="card-desc">
+          REST API бэкенд. Обрабатывает запросы от веб-интерфейса:
+          загрузка, кластеризация, управление кешем.
+        </div>
+        <span class="badge badge-info">Backend</span>
+      </div>
+
+      <div class="card" onclick="openFile('web_manager.php')">
+        <div class="card-icon">🔄</div>
+        <div class="card-title">web_manager.php</div>
+        <div class="card-desc">
+          Альтернативный вариант "всё в одном файле". Содержит
+          интерфейс и API в одном PHP файле.
+        </div>
+        <span class="badge badge-warning">Альтернатива</span>
+      </div>
+    </div>
+
+    <!-- Документация -->
+    <h2 class="section-title">📚 Документация</h2>
+
+    <div class="grid">
+      <div class="card" onclick="openFile('ИНСТРУКЦИЯ.html')">
+        <div class="card-icon">📖</div>
+        <div class="card-title">ИНСТРУКЦИЯ.html</div>
+        <div class="card-desc">
+          Визуальная инструкция с примерами, скриншотами и
+          пошаговым руководством для новичков.
+        </div>
+        <a href="ИНСТРУКЦИЯ.html" class="card-btn" target="_blank">Открыть →</a>
+      </div>
+
+      <div class="card" onclick="openFile('WEB_MANAGER_README.txt')">
+        <div class="card-icon">📗</div>
+        <div class="card-title">WEB_MANAGER_README.txt</div>
+        <div class="card-desc">
+          Подробная документация в текстовом формате со всеми
+          возможностями и настройками.
+        </div>
+        <a href="WEB_MANAGER_README.txt" class="card-btn" target="_blank">Открыть →</a>
+      </div>
+
+      <div class="card" onclick="openFile('QUICK_START_WEB.txt')">
+        <div class="card-icon">⚡</div>
+        <div class="card-title">QUICK_START_WEB.txt</div>
+        <div class="card-desc">
+          Краткая справка для быстрого старта. Содержит самую
+          необходимую информацию.
+        </div>
+        <a href="QUICK_START_WEB.txt" class="card-btn" target="_blank">Открыть →</a>
+      </div>
+
+      <div class="card" onclick="openFile('README_WEB_MANAGER.md')">
+        <div class="card-icon">📘</div>
+        <div class="card-title">README_WEB_MANAGER.md</div>
+        <div class="card-desc">
+          Полная документация в Markdown формате с таблицами,
+          списками и структурированной информацией.
+        </div>
+        <a href="README_WEB_MANAGER.md" class="card-btn" target="_blank">Открыть →</a>
+      </div>
+
+      <div class="card" onclick="openFile('КОМАНДЫ_ЗАПУСКА.txt')">
+        <div class="card-icon">💻</div>
+        <div class="card-title">КОМАНДЫ_ЗАПУСКА.txt</div>
+        <div class="card-desc">
+          Все варианты запуска сервера: батники, командная строка,
+          разные порты, проверка.
+        </div>
+        <a href="КОМАНДЫ_ЗАПУСКА.txt" class="card-btn" target="_blank">Открыть →</a>
+      </div>
+
+      <div class="card" onclick="openFile('ЧТО_СОЗДАНО.txt')">
+        <div class="card-icon">📋</div>
+        <div class="card-title">ЧТО_СОЗДАНО.txt</div>
+        <div class="card-desc">
+          Обзорный файл со списком всех созданных файлов,
+          возможностей и советов.
+        </div>
+        <a href="ЧТО_СОЗДАНО.txt" class="card-btn" target="_blank">Открыть →</a>
+      </div>
+    </div>
+
+    <!-- Демо и примеры -->
+    <h2 class="section-title">🎨 Демо и примеры</h2>
+
+    <div class="grid">
+      <div class="card" onclick="openFile('demo.html')">
+        <div class="card-icon">🎨</div>
+        <div class="card-title">demo.html</div>
+        <div class="card-desc">
+          Демонстрация интерфейса с описанием возможностей,
+          технологий и примерами использования.
+        </div>
+        <a href="demo.html" class="card-btn" target="_blank">Открыть →</a>
+      </div>
+
+      <div class="card">
+        <div class="card-icon">📁</div>
+        <div class="card-title">НАВИГАЦИЯ.html</div>
+        <div class="card-desc">
+          Этот файл. Центральная точка для быстрого доступа ко
+          всем ресурсам проекта.
+        </div>
+        <span class="badge badge-success">Вы здесь</span>
+      </div>
+    </div>
+
+    <!-- Полный список файлов -->
+    <h2 class="section-title">📄 Полный список созданных файлов</h2>
+
+    <div class="file-list">
+      <div class="file-item">
+        <div>
+          <div class="file-name">index.html</div>
+          <div class="file-desc">Веб-интерфейс (HTML + CSS + JS)</div>
+        </div>
+        <span class="badge badge-primary">Основной</span>
+      </div>
+
+      <div class="file-item">
+        <div>
+          <div class="file-name">api.php</div>
+          <div class="file-desc">REST API бэкенд</div>
+        </div>
+        <span class="badge badge-primary">Основной</span>
+      </div>
+
+      <div class="file-item">
+        <div>
+          <div class="file-name">start_manager.bat</div>
+          <div class="file-desc">Батник для запуска сервера</div>
+        </div>
+        <span class="badge badge-success">Утилита</span>
+      </div>
+
+      <div class="file-item">
+        <div>
+          <div class="file-name">СТАРТ.bat</div>
+          <div class="file-desc">Интерактивное меню</div>
+        </div>
+        <span class="badge badge-success">Утилита</span>
+      </div>
+
+      <div class="file-item">
+        <div>
+          <div class="file-name">web_manager.php</div>
+          <div class="file-desc">Альтернатива (всё в одном)</div>
+        </div>
+        <span class="badge badge-warning">Альтернатива</span>
+      </div>
+
+      <div class="file-item">
+        <div>
+          <div class="file-name">ИНСТРУКЦИЯ.html</div>
+          <div class="file-desc">Визуальная инструкция</div>
+        </div>
+        <span class="badge badge-info">Документация</span>
+      </div>
+
+      <div class="file-item">
+        <div>
+          <div class="file-name">demo.html</div>
+          <div class="file-desc">Демонстрация интерфейса</div>
+        </div>
+        <span class="badge badge-info">Демо</span>
+      </div>
+
+      <div class="file-item">
+        <div>
+          <div class="file-name">НАВИГАЦИЯ.html</div>
+          <div class="file-desc">Центр навигации (этот файл)</div>
+        </div>
+        <span class="badge badge-success">Навигация</span>
+      </div>
+
+      <div class="file-item">
+        <div>
+          <div class="file-name">WEB_MANAGER_README.txt</div>
+          <div class="file-desc">Полная документация</div>
+        </div>
+        <span class="badge badge-info">Документация</span>
+      </div>
+
+      <div class="file-item">
+        <div>
+          <div class="file-name">QUICK_START_WEB.txt</div>
+          <div class="file-desc">Краткая справка</div>
+        </div>
+        <span class="badge badge-info">Документация</span>
+      </div>
+
+      <div class="file-item">
+        <div>
+          <div class="file-name">README_WEB_MANAGER.md</div>
+          <div class="file-desc">Markdown документация</div>
+        </div>
+        <span class="badge badge-info">Документация</span>
+      </div>
+
+      <div class="file-item">
+        <div>
+          <div class="file-name">КОМАНДЫ_ЗАПУСКА.txt</div>
+          <div class="file-desc">Все команды для запуска</div>
+        </div>
+        <span class="badge badge-info">Справка</span>
+      </div>
+
+      <div class="file-item">
+        <div>
+          <div class="file-name">ЧТО_СОЗДАНО.txt</div>
+          <div class="file-desc">Обзор всех файлов</div>
+        </div>
+        <span class="badge badge-info">Обзор</span>
+      </div>
+    </div>
+
+    <!-- Быстрый старт -->
+    <h2 class="section-title">🚀 Как начать работу</h2>
+
+    <div style="background: #e7f1ff; padding: 25px; border-radius: 15px; border-left: 5px solid #667eea;">
+      <h3 style="color: #667eea; margin-bottom: 15px;">Шаг 1: Запустите сервер</h3>
+      <p style="margin-bottom: 15px;">Дважды кликните файл <strong>start_manager.bat</strong></p>
+
+      <h3 style="color: #667eea; margin-bottom: 15px;">Шаг 2: Откройте браузер</h3>
+      <p style="margin-bottom: 15px;">Перейдите на <strong>http://localhost:8000</strong></p>
+
+      <h3 style="color: #667eea; margin-bottom: 15px;">Шаг 3: Загрузите CSV</h3>
+      <p style="margin-bottom: 15px;">Перетащите файлы в область загрузки</p>
+
+      <h3 style="color: #667eea; margin-bottom: 15px;">Шаг 4: Запустите кластеризацию</h3>
+      <p>Нажмите кнопку "▶️ Запустить" у нужной группы</p>
+    </div>
+
+    <!-- Футер -->
+    <div style="text-align: center; margin-top: 40px; padding-top: 20px; border-top: 2px solid #f0f0f0; color: #999;">
+      <p style="font-size: 16px;"><strong>SEO Cluster Manager © 2024</strong></p>
+      <p style="font-size: 14px; margin-top: 5px;">Все файлы успешно созданы и готовы к использованию</p>
+    </div>
+  </div>
+
+  <script>
+    function openFile(filename) {
+      // Не открываем автоматически, чтобы пользователь мог нажать на кнопку
+    }
+
+    function launchManager() {
+      if (confirm('Запустить start_manager.bat?\n\nЭто откроет консоль с PHP сервером.')) {
+        alert('Запустите файл start_manager.bat вручную, затем откройте http://localhost:8000 в браузере.');
+      }
+    }
+  </script>
+</body>
+
+</html>

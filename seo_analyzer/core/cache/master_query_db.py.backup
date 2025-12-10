@@ -1,0 +1,1267 @@
+"""
+Master Query Database
+Единая БД со ВСЕМИ данными по запросам для мгновенной переклассификации
+"""
+
+import sqlite3
+import pandas as pd
+import json
+from pathlib import Path
+from typing import Optional, Dict, List, Any
+from datetime import datetime
+
+from .master_query_schema import (
+    MASTER_QUERY_TABLE_SCHEMA,
+    MASTER_QUERY_INDEXES,
+    MASTER_EXPORT_VIEW
+)
+
+
+class MasterQueryDatabase:
+    """
+    Master Database - единое хранилище ВСЕХ данных по запросам
+    
+    Преимущества:
+    - Всё в одном месте: интент + SERP + метрики + бренды + воронка
+    - Мгновенная переклассификация при изменении параметров кластеризации
+    - Быстрый экспорт без JOIN'ов
+    - Единый источник правды (Single Source of Truth)
+    
+    Что хранится:
+    - Предобработка (normalized, lemmatized, NER)
+    - Intent classification (main_intent, scores, флаги)
+    - SERP данные (found_docs, offer_info, цены, TOP-20 URLs)
+    - Yandex Direct (CPC, CTR, competition)
+    - SEO метрики (KEI, difficulty, traffic)
+    - Бренды и воронка
+    
+    Что НЕ хранится (рассчитывается динамически):
+    - Кластеры (зависят от параметров min_common_urls, mode и т.д.)
+    - Иерархия (зависит от алгоритма)
+    - Граф связей
+    """
+    
+    def __init__(self, db_path: Path = None):
+        """
+        Args:
+            db_path: Путь к БД (по умолчанию output/master_queries.db)
+        """
+        if db_path is None:
+            db_path = Path("output/master_queries.db")
+        
+        self.db_path = db_path
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        self._init_database()
+    
+    def _init_database(self):
+        """Инициализация таблиц БД с оптимизациями (как PostgreSQL)"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # ========================================
+        # PRAGMA оптимизации (аналог PostgreSQL настроек)
+        # ========================================
+        
+        # Журнал в WAL режиме - параллельные чтения (как в PostgreSQL)
+        cursor.execute("PRAGMA journal_mode = WAL")
+        
+        # Синхронизация NORMAL - баланс скорости/безопасности
+        cursor.execute("PRAGMA synchronous = NORMAL")
+        
+        # Увеличиваем cache size до 64MB (по умолчанию 2MB)
+        cursor.execute("PRAGMA cache_size = -64000")  # отрицательное = KB
+        
+        # Оптимизация temp store в памяти
+        cursor.execute("PRAGMA temp_store = MEMORY")
+        
+        # Увеличиваем page size до 32KB (по умолчанию 4KB)
+        # Только при создании новой БД!
+        cursor.execute("PRAGMA page_size = 32768")
+        
+        # Автоматический VACUUM при закрытии
+        cursor.execute("PRAGMA auto_vacuum = INCREMENTAL")
+        
+        # Включаем foreign keys
+        cursor.execute("PRAGMA foreign_keys = ON")
+        
+        # Анализ статистики для оптимизатора запросов (как ANALYZE в PostgreSQL)
+        cursor.execute("PRAGMA optimize")
+        
+        print("✓ SQLite оптимизации применены (WAL, cache 64MB, page 32KB)")
+        
+        # Создаём таблицу групп (из query_cache_db)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS query_groups (
+                group_name TEXT PRIMARY KEY,
+                csv_file_path TEXT NOT NULL,
+                csv_hash TEXT NOT NULL,
+                total_queries INTEGER NOT NULL,
+                unique_queries INTEGER NOT NULL,
+                duplicates_removed INTEGER NOT NULL,
+                imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                processing_version TEXT DEFAULT '2.0'
+            )
+        ''')
+        
+        # Создаём master таблицу
+        cursor.execute(MASTER_QUERY_TABLE_SCHEMA)
+        
+        # Создаём индексы
+        for index_sql in MASTER_QUERY_INDEXES:
+            cursor.execute(index_sql)
+        
+        # Создаём view для экспорта
+        cursor.execute(MASTER_EXPORT_VIEW)
+        
+        conn.commit()
+        conn.close()
+        
+        print("✓ Master Query Database инициализирована")
+    
+    def save_queries(
+        self,
+        group_name: str,
+        df: pd.DataFrame,
+        csv_path: Path = None,
+        csv_hash: str = None
+    ):
+        """
+        Сохраняет/обновляет запросы в master таблице
+        
+        Args:
+            group_name: Название группы
+            df: DataFrame со ВСЕМИ обработанными данными
+            csv_path: Путь к CSV (опционально)
+            csv_hash: Hash CSV (опционально)
+        """
+        conn = sqlite3.connect(self.db_path)
+        
+        try:
+            cursor = conn.cursor()
+            
+            # Загружаем существующие данные из БД перед сохранением
+            # Это нужно чтобы сохранить SERP данные, которые были сохранены через update_serp_metrics
+            existing_df = None
+            try:
+                existing_df = self.load_queries(group_name)
+                if existing_df is not None and len(existing_df) > 0:
+                    # Создаем индекс по keyword для быстрого поиска
+                    existing_df = existing_df.set_index('keyword')
+            except:
+                # Если группы нет - это нормально, продолжаем
+                existing_df = None
+            
+            # Маппинг имен колонок из DataFrame в БД
+            column_mapping = {
+                'serp_docs_count': 'serp_found_docs',
+                'serp_titles_count': 'serp_titles_with_keyword',
+            }
+            
+            # Применяем маппинг имен колонок
+            df_copy = df.copy()
+            for df_col, db_col in column_mapping.items():
+                if df_col in df_copy.columns and db_col not in df_copy.columns:
+                    df_copy[db_col] = df_copy[df_col]
+            
+            # Объединяем существующие данные с новыми
+            if existing_df is not None and len(existing_df) > 0:
+                # Для каждого запроса из DataFrame объединяем данные
+                for idx, row in df_copy.iterrows():
+                    keyword = row.get('keyword')
+                    if keyword and keyword in existing_df.index:
+                        existing_row = existing_df.loc[keyword]
+                        
+                        # Сохраняем SERP данные из БД если их нет в DataFrame
+                        serp_fields = [
+                            'serp_req_id', 'serp_status', 'serp_error_message',
+                            'serp_found_docs', 'serp_main_pages_count', 'serp_titles_with_keyword',
+                            'serp_commercial_domains', 'serp_info_domains',
+                            'serp_intent', 'serp_confidence', 'serp_docs_with_offers',
+                            'serp_total_docs', 'serp_offer_ratio',
+                            'serp_avg_price', 'serp_min_price', 'serp_max_price',
+                            'serp_median_price', 'serp_currency',
+                            'serp_offers_count', 'serp_offers_with_discount',
+                            'serp_avg_discount_percent', 'serp_top_urls', 'serp_lsi_phrases',
+                            'serp_created_at', 'serp_updated_at'
+                        ]
+                        
+                        for field in serp_fields:
+                            # Если поле есть в существующих данных и отсутствует или пустое в DataFrame
+                            if field in existing_df.columns:
+                                existing_val = existing_row.get(field)
+                                df_val = row.get(field)
+                                
+                                # Сохраняем существующее значение если в DataFrame его нет или оно пустое
+                                if pd.notna(existing_val) and (pd.isna(df_val) or df_val == '' or df_val == 0):
+                                    df_copy.at[idx, field] = existing_val
+            
+            # Обновляем метаданные группы
+            if csv_path and csv_hash:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO query_groups 
+                    (group_name, csv_file_path, csv_hash, total_queries, unique_queries, 
+                     duplicates_removed, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (
+                    group_name,
+                    str(csv_path),
+                    csv_hash,
+                    len(df),
+                    len(df),
+                    0
+                ))
+            
+            # Подготавливаем данные для вставки
+            queries_data = []
+            
+            # Вспомогательная функция для безопасного получения значений
+            def safe_get(row, key, default=None, cast=None):
+                """Безопасное получение значения с приведением типа"""
+                if key not in df_copy.columns:
+                    return default
+                val = row.get(key)
+                if pd.isna(val):
+                    return default
+                if cast:
+                    try:
+                        return cast(val)
+                    except (ValueError, TypeError):
+                        return default
+                return val
+            
+            for _, row in df_copy.iterrows():
+                # SERP TOP URLs как JSON
+                # ВАЖНО: Всегда сохраняем в едином формате - список объектов {position, url, domain, title, is_commercial}
+                serp_top_urls = None
+                if 'serp_top_urls' in df_copy.columns:
+                    val = row.get('serp_top_urls')
+                    if val is not None and not (isinstance(val, float) and pd.isna(val)):
+                        # Если это уже строка (JSON) - используем как есть
+                        if isinstance(val, str):
+                            serp_top_urls = val
+                        else:
+                            # Если это список - проверяем формат и нормализуем
+                            if isinstance(val, list) and len(val) > 0:
+                                # Проверяем формат первого элемента
+                                if isinstance(val[0], dict):
+                                    # Уже правильный формат - список объектов
+                                    serp_top_urls = json.dumps(val, ensure_ascii=False)
+                                elif isinstance(val[0], str):
+                                    # Список строк - преобразуем в список объектов
+                                    normalized_urls = []
+                                    for i, url in enumerate(val[:20], 1):
+                                        normalized_urls.append({
+                                            'position': i,
+                                            'url': url,
+                                            'domain': '',
+                                            'title': '',
+                                            'is_commercial': False
+                                        })
+                                    serp_top_urls = json.dumps(normalized_urls, ensure_ascii=False)
+                                else:
+                                    serp_top_urls = json.dumps(val, ensure_ascii=False)
+                            else:
+                                serp_top_urls = json.dumps(val, ensure_ascii=False)
+                elif 'serp_urls' in df_copy.columns:
+                    # Текущий pipeline создает колонку serp_urls со списком URL (строки)
+                    val = row.get('serp_urls')
+                    if val is not None and not (isinstance(val, float) and pd.isna(val)):
+                        if isinstance(val, str):
+                            # Если строка - пробуем парсить
+                            try:
+                                parsed = json.loads(val)
+                                if isinstance(parsed, list) and len(parsed) > 0:
+                                    if isinstance(parsed[0], str):
+                                        # Список строк - преобразуем в список объектов
+                                        normalized_urls = []
+                                        for i, url in enumerate(parsed[:20], 1):
+                                            normalized_urls.append({
+                                                'position': i,
+                                                'url': url,
+                                                'domain': '',
+                                                'title': '',
+                                                'is_commercial': False
+                                            })
+                                        serp_top_urls = json.dumps(normalized_urls, ensure_ascii=False)
+                                    else:
+                                        serp_top_urls = val  # Уже правильный формат
+                                else:
+                                    serp_top_urls = val
+                            except:
+                                serp_top_urls = val
+                        elif isinstance(val, list):
+                            # Список строк - преобразуем в список объектов
+                            normalized_urls = []
+                            for i, url in enumerate(val[:20], 1):
+                                if isinstance(url, str):
+                                    normalized_urls.append({
+                                        'position': i,
+                                        'url': url,
+                                        'domain': '',
+                                        'title': '',
+                                        'is_commercial': False
+                                    })
+                                elif isinstance(url, dict):
+                                    # Уже объект - используем как есть
+                                    normalized_urls.append(url)
+                            serp_top_urls = json.dumps(normalized_urls, ensure_ascii=False) if normalized_urls else None
+                        else:
+                            serp_top_urls = json.dumps(val, ensure_ascii=False) if val else None
+                elif 'top_urls' in df_copy.columns:
+                    val = row.get('top_urls')
+                    if val is not None and not (isinstance(val, float) and pd.isna(val)):
+                        if isinstance(val, str):
+                            serp_top_urls = val
+                        else:
+                            # Нормализуем формат
+                            if isinstance(val, list) and len(val) > 0:
+                                if isinstance(val[0], dict):
+                                    serp_top_urls = json.dumps(val, ensure_ascii=False)
+                                elif isinstance(val[0], str):
+                                    normalized_urls = []
+                                    for i, url in enumerate(val[:20], 1):
+                                        normalized_urls.append({
+                                            'position': i,
+                                            'url': url,
+                                            'domain': '',
+                                            'title': '',
+                                            'is_commercial': False
+                                        })
+                                    serp_top_urls = json.dumps(normalized_urls, ensure_ascii=False)
+                                else:
+                                    serp_top_urls = json.dumps(val, ensure_ascii=False)
+                            else:
+                                serp_top_urls = json.dumps(val, ensure_ascii=False)
+                
+                # LSI phrases как JSON
+                serp_lsi_phrases = None
+                if 'serp_lsi_phrases' in df_copy.columns:
+                    val = row.get('serp_lsi_phrases')
+                    if val is not None and not (isinstance(val, float) and pd.isna(val)):
+                        serp_lsi_phrases = val if isinstance(val, str) else json.dumps(val)
+                elif 'lsi_phrases' in df_copy.columns:
+                    # Текущий pipeline создает колонку lsi_phrases
+                    val = row.get('lsi_phrases')
+                    if val is not None and not (isinstance(val, float) and pd.isna(val)):
+                        serp_lsi_phrases = val if isinstance(val, str) else json.dumps(val)
+                
+                queries_data.append((
+                    group_name,
+                    # Базовые
+                    safe_get(row, 'keyword', ''),
+                    safe_get(row, 'frequency_world', 0, int),
+                    safe_get(row, 'frequency_exact', 0, int),
+                    # Предобработка
+                    safe_get(row, 'normalized'),
+                    safe_get(row, 'lemmatized'),
+                    safe_get(row, 'words_count', 0, int),
+                    safe_get(row, 'main_words'),
+                    safe_get(row, 'key_phrase'),
+                    # NER
+                    safe_get(row, 'ner_entities'),
+                    safe_get(row, 'ner_locations'),
+                    safe_get(row, 'has_geo', False, bool),
+                    safe_get(row, 'geo_type'),
+                    safe_get(row, 'geo_country'),
+                    safe_get(row, 'geo_city'),
+                    # Intent
+                    safe_get(row, 'main_intent'),
+                    safe_get(row, 'commercial_score', 0.0, float),
+                    safe_get(row, 'informational_score', 0.0, float),
+                    safe_get(row, 'navigational_score', 0.0, float),
+                    # Флаги
+                    safe_get(row, 'is_commercial', False, bool),
+                    safe_get(row, 'is_wholesale', False, bool),
+                    safe_get(row, 'is_urgent', False, bool),
+                    safe_get(row, 'is_diy', False, bool),
+                    safe_get(row, 'is_review', False, bool),
+                    safe_get(row, 'is_brand_query', False, bool),
+                    # SERP базовые
+                    safe_get(row, 'serp_query_hash'),
+                    # serp_req_id сохраняется из существующих данных если его нет в DataFrame
+                    # Это нужно чтобы не потерять req_id после completed статуса
+                    safe_get(row, 'serp_req_id'),
+                    # Статус по умолчанию 'completed' только если его нет ни в DataFrame, ни в БД
+                    safe_get(row, 'serp_status') or 'completed',
+                    safe_get(row, 'serp_error_message'),  # Текст ошибки если есть
+                    safe_get(row, 'serp_found_docs', None, int),
+                    safe_get(row, 'serp_main_pages_count', None, int),
+                    safe_get(row, 'serp_titles_with_keyword', None, int),
+                    safe_get(row, 'serp_commercial_domains', None, int),
+                    safe_get(row, 'serp_info_domains', None, int),
+                    safe_get(row, 'serp_created_at'),
+                    safe_get(row, 'serp_updated_at'),  # Последнее обновление статуса
+                    # SERP offer info
+                    safe_get(row, 'serp_intent'),
+                    safe_get(row, 'serp_confidence', 0.0, float),
+                    safe_get(row, 'serp_docs_with_offers', 0, int),
+                    safe_get(row, 'serp_total_docs', 0, int),
+                    safe_get(row, 'serp_offer_ratio', 0.0, float),
+                    # Цены
+                    safe_get(row, 'serp_avg_price', None, float),
+                    safe_get(row, 'serp_min_price', None, float),
+                    safe_get(row, 'serp_max_price', None, float),
+                    safe_get(row, 'serp_median_price', None, float),
+                    safe_get(row, 'serp_currency', 'RUR'),
+                    safe_get(row, 'serp_offers_count', 0, int),
+                    safe_get(row, 'serp_offers_with_discount', 0, int),
+                    safe_get(row, 'serp_avg_discount_percent', None, float),
+                    # SERP URLs & LSI  
+                    serp_top_urls,
+                    serp_lsi_phrases,
+                    # Yandex Direct
+                    safe_get(row, 'direct_shows', None, int),
+                    safe_get(row, 'direct_clicks', None, int),
+                    safe_get(row, 'direct_ctr', None, float),
+                    safe_get(row, 'direct_min_cpc', None, float),
+                    safe_get(row, 'direct_avg_cpc', None, float),
+                    safe_get(row, 'direct_max_cpc', None, float),
+                    safe_get(row, 'direct_recommended_cpc', None, float),
+                    safe_get(row, 'direct_competition_level'),
+                    safe_get(row, 'direct_first_place_bid', None, float),
+                    safe_get(row, 'direct_first_place_price', None, float),
+                    # SEO метрики
+                    safe_get(row, 'kei', 0.0, float),
+                    safe_get(row, 'difficulty', 0.0, float),
+                    safe_get(row, 'competition_score', 0.0, float),
+                    safe_get(row, 'potential_traffic', 0.0, float),
+                    safe_get(row, 'expected_ctr', 0.0, float),
+                    # Бренды
+                    safe_get(row, 'detected_brand'),
+                    safe_get(row, 'brand_confidence', 0.0, float),
+                    # Воронка
+                    safe_get(row, 'funnel_stage'),
+                    safe_get(row, 'funnel_priority', 5, int),
+                ))
+        
+            # Отладка: проверяем первую запись
+            if queries_data:
+                first_tuple = queries_data[0]
+                print(f"  Отладка: первый tuple содержит {len(first_tuple)} значений")
+                if len(first_tuple) != 70:
+                    print(f"  ⚠️  Ожидалось 70 значений, получено {len(first_tuple)}")
+                    raise ValueError(f"Неверное количество значений в tuple: {len(first_tuple)} вместо 70")
+            
+            # Bulk insert или replace (сохраняем существующие данные)
+            # Разбиваем на батчи чтобы избежать ошибки "too many SQL variables"
+            # SQLite ограничивает количество переменных (~999), поэтому используем батчи по 100 записей
+            batch_size = 100
+            total_batches = (len(queries_data) + batch_size - 1) // batch_size
+            
+            insert_query = '''
+                INSERT OR REPLACE INTO master_queries 
+                (group_name, keyword, frequency_world, frequency_exact,
+                 normalized, lemmatized, words_count, main_words, key_phrase,
+                 ner_entities, ner_locations,
+                 has_geo, geo_type, geo_country, geo_city,
+                 main_intent, commercial_score, informational_score, navigational_score,
+                 is_commercial, is_wholesale, is_urgent, is_diy, is_review, is_brand_query,
+                 serp_query_hash, serp_req_id, serp_status, serp_error_message,
+                 serp_found_docs, serp_main_pages_count, serp_titles_with_keyword,
+                 serp_commercial_domains, serp_info_domains, serp_created_at, serp_updated_at,
+                 serp_intent, serp_confidence, serp_docs_with_offers, serp_total_docs, serp_offer_ratio,
+                 serp_avg_price, serp_min_price, serp_max_price, serp_median_price, serp_currency,
+                 serp_offers_count, serp_offers_with_discount, serp_avg_discount_percent,
+                 serp_top_urls, serp_lsi_phrases,
+                 direct_shows, direct_clicks, direct_ctr, direct_min_cpc, direct_avg_cpc,
+                 direct_max_cpc, direct_recommended_cpc, direct_competition_level,
+                 direct_first_place_bid, direct_first_place_price,
+                 kei, difficulty, competition_score, potential_traffic, expected_ctr,
+                 detected_brand, brand_confidence,
+                 funnel_stage, funnel_priority)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            '''
+            
+            saved_count = 0
+            for i in range(0, len(queries_data), batch_size):
+                batch = queries_data[i:i + batch_size]
+                batch_num = i // batch_size + 1
+                
+                try:
+                    cursor.executemany(insert_query, batch)
+                    saved_count += len(batch)
+                    
+                    # Показываем прогресс каждые 10 батчей
+                    if batch_num % 10 == 0 or batch_num == total_batches:
+                        print(f"  💾 Сохранено: {saved_count}/{len(queries_data)} запросов ({batch_num}/{total_batches} батчей)")
+                except Exception as e:
+                    print(f"  ⚠️  Ошибка при сохранении батча {batch_num}: {e}")
+                    # Пробуем сохранить по одной записи если батч не прошёл
+                    for single_record in batch:
+                        try:
+                            cursor.execute(insert_query, single_record)
+                            saved_count += 1
+                        except Exception as e2:
+                            query_name = single_record[1][:50] if len(single_record) > 1 else 'unknown'
+                            print(f"    ❌ Ошибка сохранения запроса '{query_name}...': {e2}")
+            
+            conn.commit()
+            
+            if saved_count < len(queries_data):
+                print(f"  ⚠️  Сохранено только {saved_count} из {len(queries_data)} запросов")
+            else:
+                print(f"  ✓ Успешно сохранено {saved_count} запросов")
+            
+            # Копируем данные из других групп для запросов, которые уже есть там
+            keywords = df['keyword'].tolist() if 'keyword' in df.columns else []
+            if keywords:
+                # Разбиваем keywords на батчи чтобы избежать ошибки "too many SQL variables"
+                # SQLite ограничивает количество переменных в IN clause (~999)
+                keyword_batch_size = 500  # Безопасный размер для IN clause
+                total_keyword_batches = (len(keywords) + keyword_batch_size - 1) // keyword_batch_size
+                updated_total = 0
+                
+                for kb_idx in range(0, len(keywords), keyword_batch_size):
+                    keyword_batch = keywords[kb_idx:kb_idx + keyword_batch_size]
+                    placeholders = ','.join(['?'] * len(keyword_batch))
+                    
+                    # Сначала обновляем существующие записи без completed данных
+                    # Используем f-string для правильной подстановки placeholders
+                    update_query = f'''
+                        UPDATE master_queries AS target
+                        SET 
+                            normalized = COALESCE(target.normalized, src.normalized),
+                            lemmatized = COALESCE(target.lemmatized, src.lemmatized),
+                            words_count = COALESCE(target.words_count, src.words_count),
+                            main_words = COALESCE(target.main_words, src.main_words),
+                            key_phrase = COALESCE(target.key_phrase, src.key_phrase),
+                            ner_entities = COALESCE(target.ner_entities, src.ner_entities),
+                            ner_locations = COALESCE(target.ner_locations, src.ner_locations),
+                            has_geo = COALESCE(target.has_geo, src.has_geo),
+                            geo_type = COALESCE(target.geo_type, src.geo_type),
+                            geo_country = COALESCE(target.geo_country, src.geo_country),
+                            geo_city = COALESCE(target.geo_city, src.geo_city),
+                            main_intent = COALESCE(target.main_intent, src.main_intent),
+                            commercial_score = COALESCE(target.commercial_score, src.commercial_score),
+                            informational_score = COALESCE(target.informational_score, src.informational_score),
+                            navigational_score = COALESCE(target.navigational_score, src.navigational_score),
+                            is_commercial = COALESCE(target.is_commercial, src.is_commercial),
+                            is_wholesale = COALESCE(target.is_wholesale, src.is_wholesale),
+                            is_urgent = COALESCE(target.is_urgent, src.is_urgent),
+                            is_diy = COALESCE(target.is_diy, src.is_diy),
+                            is_review = COALESCE(target.is_review, src.is_review),
+                            is_brand_query = COALESCE(target.is_brand_query, src.is_brand_query),
+                            serp_query_hash = COALESCE(target.serp_query_hash, src.serp_query_hash),
+                            serp_req_id = COALESCE(target.serp_req_id, src.serp_req_id),
+                            serp_status = CASE WHEN target.serp_status = 'completed' THEN target.serp_status ELSE src.serp_status END,
+                            serp_error_message = COALESCE(target.serp_error_message, src.serp_error_message),
+                            serp_found_docs = COALESCE(target.serp_found_docs, src.serp_found_docs),
+                            serp_main_pages_count = COALESCE(target.serp_main_pages_count, src.serp_main_pages_count),
+                            serp_titles_with_keyword = COALESCE(target.serp_titles_with_keyword, src.serp_titles_with_keyword),
+                            serp_commercial_domains = COALESCE(target.serp_commercial_domains, src.serp_commercial_domains),
+                            serp_info_domains = COALESCE(target.serp_info_domains, src.serp_info_domains),
+                            serp_top_urls = COALESCE(target.serp_top_urls, src.serp_top_urls),
+                            serp_lsi_phrases = COALESCE(target.serp_lsi_phrases, src.serp_lsi_phrases),
+                            serp_intent = COALESCE(target.serp_intent, src.serp_intent),
+                            serp_confidence = COALESCE(target.serp_confidence, src.serp_confidence),
+                            serp_docs_with_offers = COALESCE(target.serp_docs_with_offers, src.serp_docs_with_offers),
+                            serp_total_docs = COALESCE(target.serp_total_docs, src.serp_total_docs),
+                            serp_offer_ratio = COALESCE(target.serp_offer_ratio, src.serp_offer_ratio),
+                            serp_avg_price = COALESCE(target.serp_avg_price, src.serp_avg_price),
+                            serp_min_price = COALESCE(target.serp_min_price, src.serp_min_price),
+                            serp_max_price = COALESCE(target.serp_max_price, src.serp_max_price),
+                            serp_median_price = COALESCE(target.serp_median_price, src.serp_median_price),
+                            serp_currency = COALESCE(target.serp_currency, src.serp_currency),
+                            serp_offers_count = COALESCE(target.serp_offers_count, src.serp_offers_count),
+                            serp_offers_with_discount = COALESCE(target.serp_offers_with_discount, src.serp_offers_with_discount),
+                            serp_avg_discount_percent = COALESCE(target.serp_avg_discount_percent, src.serp_avg_discount_percent),
+                            direct_shows = COALESCE(target.direct_shows, src.direct_shows),
+                            direct_clicks = COALESCE(target.direct_clicks, src.direct_clicks),
+                            direct_ctr = COALESCE(target.direct_ctr, src.direct_ctr),
+                            direct_min_cpc = COALESCE(target.direct_min_cpc, src.direct_min_cpc),
+                            direct_avg_cpc = COALESCE(target.direct_avg_cpc, src.direct_avg_cpc),
+                            direct_max_cpc = COALESCE(target.direct_max_cpc, src.direct_max_cpc),
+                            direct_recommended_cpc = COALESCE(target.direct_recommended_cpc, src.direct_recommended_cpc),
+                            direct_competition_level = COALESCE(target.direct_competition_level, src.direct_competition_level),
+                            direct_first_place_bid = COALESCE(target.direct_first_place_bid, src.direct_first_place_bid),
+                            direct_first_place_price = COALESCE(target.direct_first_place_price, src.direct_first_place_price),
+                            kei = COALESCE(target.kei, src.kei),
+                            difficulty = COALESCE(target.difficulty, src.difficulty),
+                            competition_score = COALESCE(target.competition_score, src.competition_score),
+                            potential_traffic = COALESCE(target.potential_traffic, src.potential_traffic),
+                            expected_ctr = COALESCE(target.expected_ctr, src.expected_ctr),
+                            detected_brand = COALESCE(target.detected_brand, src.detected_brand),
+                            brand_confidence = COALESCE(target.brand_confidence, src.brand_confidence),
+                            funnel_stage = COALESCE(target.funnel_stage, src.funnel_stage),
+                            funnel_priority = COALESCE(target.funnel_priority, src.funnel_priority)
+                        FROM (
+                            SELECT *
+                            FROM master_queries AS src_inner
+                            WHERE src_inner.keyword IN ({placeholders})
+                              AND src_inner.group_name != ?
+                              AND src_inner.serp_status = 'completed'
+                              AND src_inner.serp_found_docs IS NOT NULL
+                              AND src_inner.id = (
+                                  SELECT id FROM master_queries
+                                  WHERE keyword = src_inner.keyword
+                                    AND group_name != ?
+                                    AND serp_status = 'completed'
+                                    AND serp_found_docs IS NOT NULL
+                                  ORDER BY updated_at DESC
+                                  LIMIT 1
+                              )
+                        ) AS src
+                        WHERE target.group_name = ?
+                          AND target.keyword = src.keyword
+                          AND (target.serp_status IS NULL OR target.serp_status != 'completed')
+                    '''
+                    try:
+                        cursor.execute(update_query, keyword_batch + [group_name, group_name, group_name])
+                        updated_total += cursor.rowcount
+                    except Exception as e:
+                        print(f"  ⚠️  Ошибка при обновлении батча keywords {kb_idx // keyword_batch_size + 1}: {e}")
+                
+                updated_count = updated_total
+                
+                # Затем вставляем новые записи для запросов, которых нет в новой группе
+                # Также разбиваем на батчи
+                inserted_total = 0
+                for kb_idx in range(0, len(keywords), keyword_batch_size):
+                    keyword_batch = keywords[kb_idx:kb_idx + keyword_batch_size]
+                    placeholders = ','.join(['?'] * len(keyword_batch))
+                    
+                    insert_query = f'''
+                        INSERT OR IGNORE INTO master_queries 
+                        (group_name, keyword, frequency_world, frequency_exact,
+                         normalized, lemmatized, words_count, main_words, key_phrase,
+                         ner_entities, ner_locations, has_geo, geo_type, geo_country, geo_city,
+                         main_intent, commercial_score, informational_score, navigational_score,
+                         is_commercial, is_wholesale, is_urgent, is_diy, is_review, is_brand_query,
+                         serp_query_hash, serp_req_id, serp_status, serp_error_message,
+                         serp_found_docs, serp_main_pages_count, serp_titles_with_keyword,
+                         serp_commercial_domains, serp_info_domains, serp_created_at, serp_updated_at,
+                         serp_intent, serp_confidence, serp_docs_with_offers, serp_total_docs, serp_offer_ratio,
+                         serp_avg_price, serp_min_price, serp_max_price, serp_median_price, serp_currency,
+                         serp_offers_count, serp_offers_with_discount, serp_avg_discount_percent,
+                         serp_top_urls, serp_lsi_phrases,
+                         direct_shows, direct_clicks, direct_ctr, direct_min_cpc, direct_avg_cpc,
+                         direct_max_cpc, direct_recommended_cpc, direct_competition_level,
+                         direct_first_place_bid, direct_first_place_price,
+                         kei, difficulty, competition_score, potential_traffic, expected_ctr,
+                         detected_brand, brand_confidence, funnel_stage, funnel_priority)
+                        SELECT 
+                            ? as group_name,
+                            keyword, frequency_world, frequency_exact,
+                            normalized, lemmatized, words_count, main_words, key_phrase,
+                            ner_entities, ner_locations, has_geo, geo_type, geo_country, geo_city,
+                            main_intent, commercial_score, informational_score, navigational_score,
+                            is_commercial, is_wholesale, is_urgent, is_diy, is_review, is_brand_query,
+                            serp_query_hash, serp_req_id, serp_status, serp_error_message,
+                            serp_found_docs, serp_main_pages_count, serp_titles_with_keyword,
+                            serp_commercial_domains, serp_info_domains, serp_created_at, serp_updated_at,
+                            serp_intent, serp_confidence, serp_docs_with_offers, serp_total_docs, serp_offer_ratio,
+                            serp_avg_price, serp_min_price, serp_max_price, serp_median_price, serp_currency,
+                            serp_offers_count, serp_offers_with_discount, serp_avg_discount_percent,
+                            serp_top_urls, serp_lsi_phrases,
+                            direct_shows, direct_clicks, direct_ctr, direct_min_cpc, direct_avg_cpc,
+                            direct_max_cpc, direct_recommended_cpc, direct_competition_level,
+                            direct_first_place_bid, direct_first_place_price,
+                            kei, difficulty, competition_score, potential_traffic, expected_ctr,
+                            detected_brand, brand_confidence, funnel_stage, funnel_priority
+                        FROM master_queries AS src
+                        WHERE src.keyword IN ({placeholders})
+                          AND src.group_name != ?
+                          AND src.serp_status = 'completed'
+                          AND src.serp_found_docs IS NOT NULL
+                          AND src.id = (
+                              SELECT id FROM master_queries
+                              WHERE keyword = src.keyword
+                                AND group_name != ?
+                                AND serp_status = 'completed'
+                                AND serp_found_docs IS NOT NULL
+                              ORDER BY updated_at DESC
+                              LIMIT 1
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM master_queries AS existing
+                              WHERE existing.group_name = ?
+                                AND existing.keyword = src.keyword
+                          )
+                    '''
+                    try:
+                        cursor.execute(insert_query, [group_name] + keyword_batch + [group_name, group_name, group_name])
+                        inserted_total += cursor.rowcount
+                    except Exception as e:
+                        print(f"  ⚠️  Ошибка при вставке батча keywords {kb_idx // keyword_batch_size + 1}: {e}")
+                
+                inserted_count = inserted_total
+                
+                copied_count = updated_count + inserted_count
+                if copied_count > 0:
+                    print(f"📋 Скопировано данных из других групп: обновлено {updated_count}, добавлено {inserted_count}")
+                conn.commit()
+            
+            print(f"💾 Master DB: сохранено {len(df)} запросов для группы '{group_name}'")
+            
+        finally:
+            conn.close()
+    
+    def load_queries(
+        self,
+        group_name: str,
+        include_serp_urls: bool = True
+    ) -> Optional[pd.DataFrame]:
+        """
+        Загружает ВСЕ данные по запросам из мастер-таблицы
+        
+        Args:
+            group_name: Название группы
+            include_serp_urls: Включать ли serp_top_urls (большие данные)
+            
+        Returns:
+            DataFrame со всеми полями или None
+        """
+        conn = sqlite3.connect(self.db_path)
+        
+        # Выбираем все колонки кроме id и timestamps
+        columns = """
+            keyword, frequency_world, frequency_exact,
+            normalized, lemmatized, words_count, main_words, key_phrase,
+            ner_entities, ner_locations,
+            has_geo, geo_type, geo_country, geo_city,
+            main_intent, commercial_score, informational_score, navigational_score,
+            is_commercial, is_wholesale, is_urgent, is_diy, is_review, is_brand_query,
+            serp_query_hash, serp_found_docs, serp_main_pages_count, serp_titles_with_keyword,
+            serp_commercial_domains, serp_info_domains, serp_created_at,
+            serp_intent, serp_confidence, serp_docs_with_offers, serp_total_docs, serp_offer_ratio,
+            serp_avg_price, serp_min_price, serp_max_price, serp_median_price, serp_currency,
+            serp_offers_count, serp_offers_with_discount, serp_avg_discount_percent,
+            {serp_urls}
+            serp_lsi_phrases,
+            direct_shows, direct_clicks, direct_ctr, direct_min_cpc, direct_avg_cpc,
+            direct_max_cpc, direct_recommended_cpc, direct_competition_level,
+            direct_first_place_bid, direct_first_place_price,
+            kei, difficulty, competition_score, potential_traffic, expected_ctr,
+            detected_brand, brand_confidence,
+            funnel_stage, funnel_priority
+        """.format(serp_urls='serp_top_urls,' if include_serp_urls else '')
+        
+        query = f'''
+            SELECT {columns}
+            FROM master_queries
+            WHERE group_name = ?
+            ORDER BY frequency_world DESC
+        '''
+        
+        df = pd.read_sql_query(query, conn, params=(group_name,))
+        conn.close()
+        
+        if df.empty:
+            return None
+        
+        # Добавляем алиасы для совместимости с кодом
+        if 'serp_found_docs' in df.columns:
+            df['serp_docs_count'] = df['serp_found_docs']
+        if 'serp_main_pages_count' in df.columns:
+            df['serp_main_pages'] = df['serp_main_pages_count']
+            # Кол-во внутренних страниц (общее кол-во документов минус главные)
+            df['serp_internal_pages_count'] = (
+                df['serp_docs_count'] - df['serp_main_pages_count']
+            ).fillna(0).clip(lower=0).astype(int)
+        if 'serp_titles_with_keyword' in df.columns:
+            df['serp_titles_count'] = df['serp_titles_with_keyword']
+        
+        # Преобразуем serp_lsi_phrases в lsi_phrases если нужно
+        if 'serp_lsi_phrases' in df.columns and 'lsi_phrases' not in df.columns:
+            import json
+            def parse_lsi_phrases(val):
+                if pd.isna(val) or val is None or val == '':
+                    return []
+                if isinstance(val, str):
+                    try:
+                        parsed = json.loads(val)
+                        # Если это список строк - преобразуем в список словарей
+                        if isinstance(parsed, list):
+                            result = []
+                            for item in parsed:
+                                if isinstance(item, str):
+                                    result.append({'phrase': item, 'frequency': 1, 'source': 'unknown'})
+                                elif isinstance(item, dict):
+                                    result.append(item)
+                            return result
+                        return parsed if isinstance(parsed, list) else []
+                    except (json.JSONDecodeError, TypeError):
+                        return []
+                elif isinstance(val, list):
+                    return val
+                return []
+            
+            df['lsi_phrases'] = df['serp_lsi_phrases'].apply(parse_lsi_phrases)
+            
+            # Диагностика LSI фраз
+            lsi_non_empty = df['lsi_phrases'].apply(lambda x: isinstance(x, list) and len(x) > 0).sum()
+            lsi_empty = len(df) - lsi_non_empty
+            print(f"   ✓ LSI фразы: {lsi_non_empty} запросов с LSI, {lsi_empty} без LSI")
+        
+        print(f"📦 Master DB: загружено {len(df)} запросов для группы '{group_name}'")
+        print(f"   ✓ Интент: {df['main_intent'].notna().sum()} записей")
+        print(f"   ✓ SERP: {df['serp_found_docs'].notna().sum()} записей")
+        print(f"   ✓ Direct: {df['direct_shows'].notna().sum()} записей")
+        
+        return df
+    
+    def group_exists(self, group_name: str) -> bool:
+        """Проверяет существует ли группа"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            'SELECT COUNT(*) FROM master_queries WHERE group_name = ?',
+            (group_name,)
+        )
+        exists = cursor.fetchone()[0] > 0
+        
+        conn.close()
+        return exists
+    
+    def get_group_info(self, group_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Получает информацию о группе из таблицы query_groups
+        
+        Args:
+            group_name: Название группы
+            
+        Returns:
+            Словарь с информацией о группе (csv_hash, csv_file_path, total_queries и т.д.)
+            или None если группа не найдена
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT csv_file_path, csv_hash, total_queries, unique_queries, 
+                   duplicates_removed, imported_at, updated_at
+            FROM query_groups
+            WHERE group_name = ?
+        ''', (group_name,))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result is None:
+            return None
+        
+        return {
+            'csv_file_path': result[0],
+            'csv_hash': result[1],
+            'total_queries': result[2],
+            'unique_queries': result[3],
+            'duplicates_removed': result[4],
+            'imported_at': result[5],
+            'updated_at': result[6]
+        }
+    
+    def get_statistics(self, group_name: str = None) -> Dict[str, Any]:
+        """Статистика по группе или всей БД"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        if group_name:
+            cursor.execute('''
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN main_intent IS NOT NULL THEN 1 ELSE 0 END) as with_intent,
+                    SUM(CASE WHEN serp_found_docs IS NOT NULL THEN 1 ELSE 0 END) as with_serp,
+                    SUM(CASE WHEN direct_shows IS NOT NULL THEN 1 ELSE 0 END) as with_direct,
+                    AVG(kei) as avg_kei,
+                    AVG(serp_offer_ratio) as avg_offer_ratio
+                FROM master_queries
+                WHERE group_name = ?
+            ''', (group_name,))
+        else:
+            cursor.execute('''
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN main_intent IS NOT NULL THEN 1 ELSE 0 END) as with_intent,
+                    SUM(CASE WHEN serp_found_docs IS NOT NULL THEN 1 ELSE 0 END) as with_serp,
+                    SUM(CASE WHEN direct_shows IS NOT NULL THEN 1 ELSE 0 END) as with_direct,
+                    AVG(kei) as avg_kei,
+                    AVG(serp_offer_ratio) as avg_offer_ratio
+                FROM master_queries
+            ''')
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        return {
+            'total_queries': result[0],
+            'with_intent': result[1],
+            'with_serp': result[2],
+            'with_direct': result[3],
+            'avg_kei': round(result[4], 2) if result[4] else 0,
+            'avg_offer_ratio': round(result[5], 4) if result[5] else 0,
+        }
+    
+    def analyze_query_performance(self, query: str) -> Dict[str, Any]:
+        """
+        Анализирует производительность SQL запроса (EXPLAIN QUERY PLAN)
+        Аналог EXPLAIN ANALYZE в PostgreSQL
+        
+        Args:
+            query: SQL запрос для анализа
+            
+        Returns:
+            План выполнения запроса
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # EXPLAIN QUERY PLAN показывает какие индексы используются
+        cursor.execute(f"EXPLAIN QUERY PLAN {query}")
+        plan = cursor.fetchall()
+        
+        conn.close()
+        
+        return {
+            'query': query,
+            'execution_plan': [
+                {
+                    'id': row[0],
+                    'parent': row[1],
+                    'detail': row[3]
+                }
+                for row in plan
+            ]
+        }
+    
+    def rebuild_indexes(self):
+        """
+        Пересоздаёт индексы (аналог REINDEX в PostgreSQL)
+        Полезно после массовых INSERT/UPDATE
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        print("🔄 Пересоздание индексов...")
+        
+        # Удаляем старые индексы
+        cursor.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='index' AND name LIKE 'idx_master_%'
+        """)
+        
+        indexes = cursor.fetchall()
+        for (index_name,) in indexes:
+            cursor.execute(f"DROP INDEX IF EXISTS {index_name}")
+            print(f"   ✓ Удалён: {index_name}")
+        
+        # Создаём заново
+        for index_sql in MASTER_QUERY_INDEXES:
+            cursor.execute(index_sql)
+        
+        # ANALYZE для обновления статистики оптимизатора
+        cursor.execute("ANALYZE master_queries")
+        
+        conn.commit()
+        conn.close()
+        
+        print(f"✓ Пересоздано {len(MASTER_QUERY_INDEXES)} индексов")
+        print("✓ ANALYZE выполнен (статистика обновлена)")
+    
+    def get_index_usage_stats(self) -> List[Dict[str, Any]]:
+        """
+        Статистика использования индексов
+        Показывает какие индексы реально используются
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Получаем список индексов
+        cursor.execute("""
+            SELECT 
+                name,
+                tbl_name,
+                sql
+            FROM sqlite_master 
+            WHERE type='index' AND name LIKE 'idx_master_%'
+            ORDER BY name
+        """)
+        
+        indexes = []
+        for row in cursor.fetchall():
+            indexes.append({
+                'index_name': row[0],
+                'table_name': row[1],
+                'definition': row[2]
+            })
+        
+        conn.close()
+        
+        return indexes
+    
+    def optimize_database(self):
+        """
+        Полная оптимизация БД (как VACUUM ANALYZE в PostgreSQL)
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        print("🔄 Оптимизация БД...")
+        
+        # 1. VACUUM - очистка неиспользуемого места
+        print("   → VACUUM (дефрагментация)...")
+        cursor.execute("VACUUM")
+        
+        # 2. ANALYZE - обновление статистики для оптимизатора
+        print("   → ANALYZE (статистика)...")
+        cursor.execute("ANALYZE")
+        
+        # 3. PRAGMA optimize - автоматическая оптимизация
+        print("   → PRAGMA optimize...")
+        cursor.execute("PRAGMA optimize")
+        
+        conn.commit()
+        conn.close()
+        
+        # Размер БД после оптимизации
+        size_mb = self.db_path.stat().st_size / (1024 * 1024)
+        
+        print(f"✓ Оптимизация завершена")
+        print(f"✓ Размер БД: {size_mb:.1f} MB")
+    
+    def get_pending_serp_queries(self, group_name: str) -> List[Dict[str, Any]]:
+        """
+        Получить запросы с незавершённой загрузкой SERP
+        (для восстановления после падения скрипта)
+        
+        Args:
+            group_name: Название группы
+            
+        Returns:
+            Список запросов со статусом pending/processing
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT keyword, serp_req_id, serp_status, serp_error_message
+            FROM master_queries
+            WHERE group_name = ? 
+              AND serp_status IN ('pending', 'processing')
+            ORDER BY created_at
+        ''', (group_name,))
+        
+        pending = []
+        for row in cursor.fetchall():
+            pending.append({
+                'keyword': row[0],
+                'serp_req_id': row[1],
+                'serp_status': row[2],
+                'serp_error_message': row[3]
+            })
+        
+        conn.close()
+        return pending
+    
+    def update_serp_status(
+        self,
+        group_name: str,
+        keyword: str,
+        status: str,
+        req_id: str = None,
+        error_message: str = None
+    ):
+        """
+        Обновить статус SERP запроса
+        
+        Статусы:
+        - pending: Запрос ещё не отправлен в xmlstock
+        - processing: Запрос отправлен (получен req_id), ждём ответа от xmlstock
+        - completed: Данные успешно получены
+        - error: Ошибка при загрузке
+        
+        Args:
+            group_name: Название группы
+            keyword: Запрос
+            status: Статус (pending/processing/completed/error)
+            req_id: ID запроса в xmlstock (сохраняется сразу после отправки)
+            error_message: Текст ошибки
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE master_queries
+            SET serp_status = ?,
+                serp_req_id = COALESCE(?, serp_req_id),
+                serp_error_message = ?,
+                serp_updated_at = CURRENT_TIMESTAMP
+            WHERE group_name = ? AND keyword = ?
+        ''', (status, req_id, error_message, group_name, keyword))
+        
+        conn.commit()
+        conn.close()
+    
+    def mark_serp_as_pending(self, group_name: str, keywords: List[str]):
+        """
+        Отметить запросы как ожидающие загрузки SERP
+        (перед началом массовой загрузки)
+        
+        Args:
+            group_name: Название группы
+            keywords: Список запросов
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Batch update
+        cursor.executemany('''
+            UPDATE master_queries
+            SET serp_status = 'pending',
+                serp_updated_at = CURRENT_TIMESTAMP
+            WHERE group_name = ? AND keyword = ?
+        ''', [(group_name, kw) for kw in keywords])
+        
+        conn.commit()
+        conn.close()
+        
+        print(f"✓ Отмечено {len(keywords)} запросов как pending для SERP загрузки")
+    
+    def get_serp_statistics(self, group_name: str) -> Dict[str, Any]:
+        """
+        Статистика по SERP загрузке
+        
+        Args:
+            group_name: Название группы
+            
+        Returns:
+            Статистика по статусам
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN serp_status = 'completed' THEN 1 ELSE 0 END) as completed,
+                SUM(CASE WHEN serp_status = 'pending' THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN serp_status = 'processing' THEN 1 ELSE 0 END) as processing,
+                SUM(CASE WHEN serp_status = 'error' THEN 1 ELSE 0 END) as error,
+                SUM(CASE WHEN serp_found_docs IS NOT NULL THEN 1 ELSE 0 END) as with_data
+            FROM master_queries
+            WHERE group_name = ?
+        ''', (group_name,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if not row or row[0] == 0:
+            return {
+                'total': 0,
+                'completed': 0,
+                'pending': 0,
+                'processing': 0,
+                'error': 0,
+                'with_data': 0,
+                'completion_rate': 0.0
+            }
+        
+        return {
+            'total': row[0],
+            'completed': row[1] or 0,
+            'pending': row[2] or 0,
+            'processing': row[3] or 0,
+            'error': row[4] or 0,
+            'with_data': row[5] or 0,
+            'completion_rate': (row[1] or 0) / row[0] if row[0] > 0 else 0.0
+        }
+    
+    def update_serp_metrics(
+        self,
+        group_name: str,
+        keyword: str,
+        metrics: Dict[str, Any],
+        documents: List[Dict],
+        lsi_phrases: List[Dict]
+    ):
+        """
+        Обновить SERP метрики для конкретного запроса
+        
+        Args:
+            group_name: Название группы
+            keyword: Ключевое слово
+            metrics: Словарь с метриками из SERPDataEnricher
+            documents: Список документов (для извлечения TOP-20)
+            lsi_phrases: Список LSI фраз
+        """
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            
+            # Формируем TOP-20 URLs для кластеризации
+            top_urls = []
+            for i, doc in enumerate(documents[:20], 1):
+                top_urls.append({
+                    'position': i,
+                    'url': doc.get('url', ''),
+                    'domain': doc.get('domain', ''),
+                    'title': doc.get('title', ''),
+                    'is_commercial': doc.get('is_commercial', False)
+                })
+            
+            # LSI фразы как JSON
+            lsi_json = json.dumps(lsi_phrases, ensure_ascii=False) if lsi_phrases else None
+            top_urls_json = json.dumps(top_urls, ensure_ascii=False) if top_urls else None
+            
+            cursor.execute('''
+                UPDATE master_queries
+                SET
+                    serp_found_docs = ?,
+                    serp_main_pages_count = ?,
+                    serp_titles_with_keyword = ?,
+                    serp_commercial_domains = ?,
+                    serp_info_domains = ?,
+                    serp_intent = ?,
+                    serp_confidence = ?,
+                    serp_docs_with_offers = ?,
+                    serp_total_docs = ?,
+                    serp_offer_ratio = ?,
+                    serp_avg_price = ?,
+                    serp_min_price = ?,
+                    serp_max_price = ?,
+                    serp_median_price = ?,
+                    serp_currency = ?,
+                    serp_offers_count = ?,
+                    serp_offers_with_discount = ?,
+                    serp_avg_discount_percent = ?,
+                    serp_top_urls = ?,
+                    serp_lsi_phrases = ?,
+                    serp_updated_at = CURRENT_TIMESTAMP
+                WHERE group_name = ? AND keyword = ?
+            ''', (
+                metrics.get('found_docs'),
+                metrics.get('main_pages_count'),
+                metrics.get('titles_with_keyword'),
+                metrics.get('commercial_domains_count'),
+                metrics.get('informational_domains_count'),
+                metrics.get('serp_intent'),
+                metrics.get('serp_confidence'),
+                metrics.get('docs_with_offers'),
+                metrics.get('total_docs_analyzed'),
+                metrics.get('offer_ratio'),
+                metrics.get('avg_price'),
+                metrics.get('min_price'),
+                metrics.get('max_price'),
+                metrics.get('median_price'),
+                metrics.get('currency', 'RUR'),
+                metrics.get('offers_count'),
+                metrics.get('offers_with_discount'),
+                metrics.get('avg_discount_percent'),
+                top_urls_json,
+                lsi_json,
+                group_name,
+                keyword
+            ))
+            
+            conn.commit()
+        
+        finally:
+            conn.close()
+
+
+__all__ = ['MasterQueryDatabase']
+

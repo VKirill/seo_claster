@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Инструкция - SEO Cluster Manager</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      padding: 20px;
+      line-height: 1.6;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 20px;
+      padding: 40px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    }
+
+    h1 {
+      color: #667eea;
+      text-align: center;
+      font-size: 36px;
+      margin-bottom: 10px;
+    }
+
+    .subtitle {
+      text-align: center;
+      color: #666;
+      font-size: 18px;
+      margin-bottom: 40px;
+    }
+
+    .section {
+      margin: 30px 0;
+    }
+
+    h2 {
+      color: #667eea;
+      font-size: 28px;
+      margin: 30px 0 20px 0;
+      padding-bottom: 10px;
+      border-bottom: 3px solid #667eea;
+    }
+
+    h3 {
+      color: #333;
+      font-size: 20px;
+      margin: 20px 0 10px 0;
+    }
+
+    .step-box {
+      background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+      border-left: 5px solid #667eea;
+      padding: 20px;
+      margin: 15px 0;
+      border-radius: 10px;
+      box-shadow: 0 3px 10px rgba(0, 0, 0, 0.1);
+    }
+
+    .step-number {
+      display: inline-block;
+      background: #667eea;
+      color: white;
+      width: 35px;
+      height: 35px;
+      line-height: 35px;
+      text-align: center;
+      border-radius: 50%;
+      font-weight: bold;
+      margin-right: 10px;
+    }
+
+    .step-title {
+      font-size: 18px;
+      font-weight: bold;
+      color: #333;
+      margin-bottom: 10px;
+    }
+
+    .code {
+      background: #2d2d2d;
+      color: #f8f8f2;
+      padding: 15px;
+      border-radius: 8px;
+      font-family: 'Courier New', monospace;
+      margin: 10px 0;
+      overflow-x: auto;
+    }
+
+    .warning {
+      background: #fff3cd;
+      border-left: 5px solid #ffc107;
+      padding: 15px;
+      margin: 15px 0;
+      border-radius: 5px;
+    }
+
+    .success {
+      background: #d4edda;
+      border-left: 5px solid #28a745;
+      padding: 15px;
+      margin: 15px 0;
+      border-radius: 5px;
+    }
+
+    .info {
+      background: #d1ecf1;
+      border-left: 5px solid #17a2b8;
+      padding: 15px;
+      margin: 15px 0;
+      border-radius: 5px;
+    }
+
+    .btn {
+      display: inline-block;
+      background: #667eea;
+      color: white;
+      padding: 15px 30px;
+      border-radius: 25px;
+      text-decoration: none;
+      font-weight: bold;
+      margin: 10px 10px 10px 0;
+      transition: all 0.3s;
+      box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
+    }
+
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(102, 126, 234, 0.5);
+    }
+
+    .btn-success {
+      background: #28a745;
+    }
+
+    .feature-list {
+      list-style: none;
+      padding: 0;
+    }
+
+    .feature-list li {
+      background: #f8f9fa;
+      padding: 12px 15px;
+      margin: 8px 0;
+      border-radius: 8px;
+      border-left: 4px solid #667eea;
+    }
+
+    .feature-list li:before {
+      content: "✓ ";
+      color: #28a745;
+      font-weight: bold;
+      margin-right: 10px;
+    }
+
+    .files-grid {
+      display: grid;
+      grid-template-columns: 1fr 2fr;
+      gap: 10px;
+      margin: 15px 0;
+      font-size: 14px;
+    }
+
+    .file-name {
+      font-weight: bold;
+      color: #667eea;
+      background: #f8f9fa;
+      padding: 8px;
+      border-radius: 5px;
+    }
+
+    .file-desc {
+      color: #666;
+      padding: 8px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 20px 0;
+    }
+
+    th,
+    td {
+      padding: 12px;
+      text-align: left;
+      border-bottom: 1px solid #ddd;
+    }
+
+    th {
+      background: #667eea;
+      color: white;
+      font-weight: bold;
+    }
+
+    tr:hover {
+      background: #f5f5f5;
+    }
+
+    .center {
+      text-align: center;
+      margin: 30px 0;
+    }
+
+    .emoji {
+      font-size: 24px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <h1>🔍 SEO Cluster Manager</h1>
+    <div class="subtitle">Веб-интерфейс для управления кластеризацией</div>
+
+    <div class="success">
+      <strong>✅ Успешно создан!</strong> Все файлы готовы к использованию.
+    </div>
+
+    <!-- Файлы проекта -->
+    <h2>📦 Созданные файлы</h2>
+
+    <div class="files-grid">
+      <div class="file-name">index.html</div>
+      <div class="file-desc">Главный веб-интерфейс (фронтенд)</div>
+
+      <div class="file-name">api.php</div>
+      <div class="file-desc">REST API бэкенд для обработки запросов</div>
+
+      <div class="file-name">start_manager.bat</div>
+      <div class="file-desc">Батник для быстрого запуска сервера</div>
+
+      <div class="file-name">web_manager.php</div>
+      <div class="file-desc">Альтернатива (всё в одном файле)</div>
+
+      <div class="file-name">demo.html</div>
+      <div class="file-desc">Демонстрация возможностей</div>
+
+      <div class="file-name">WEB_MANAGER_README.txt</div>
+      <div class="file-desc">Подробная документация</div>
+
+      <div class="file-name">QUICK_START_WEB.txt</div>
+      <div class="file-desc">Краткая инструкция</div>
+    </div>
+
+    <!-- Быстрый старт -->
+    <h2>🚀 Быстрый старт</h2>
+
+    <div class="step-box">
+      <div class="step-title">
+        <span class="step-number">1</span>
+        Запустите сервер
+      </div>
+      <p>Дважды кликните на файл:</p>
+      <div class="code">start_manager.bat</div>
+      <p>Или выполните команду:</p>
+      <div class="code">php -S localhost:8000 index.html</div>
+    </div>
+
+    <div class="step-box">
+      <div class="step-title">
+        <span class="step-number">2</span>
+        Откройте в браузере
+      </div>
+      <p>Перейдите по адресу:</p>
+      <div class="code">http://localhost:8000</div>
+      <div class="info">
+        <strong>💡 Совет:</strong> Используйте Chrome, Edge или Firefox для лучшей совместимости.
+      </div>
+    </div>
+
+    <div class="step-box">
+      <div class="step-title">
+        <span class="step-number">3</span>
+        Загрузите файлы
+      </div>
+      <p>Перетащите CSV файлы с семантикой в область загрузки или нажмите на неё для выбора файлов.</p>
+      <div class="success">
+        <strong>✓</strong> Файлы автоматически сохранятся в папку <code>semantika/</code>
+      </div>
+    </div>
+
+    <div class="step-box">
+      <div class="step-title">
+        <span class="step-number">4</span>
+        Запустите кластеризацию
+      </div>
+      <p>Нажмите кнопку <strong>"▶️ Запустить"</strong> у нужной группы.</p>
+      <p>Или нажмите <strong>"🚀 Запустить кластеризацию всех групп"</strong></p>
+      <div class="info">
+        <strong>💡 Процесс запускается в фоне.</strong> Можно закрыть браузер — кластеризация продолжится.
+      </div>
+    </div>
+
+    <!-- Возможности -->
+    <h2>✨ Возможности интерфейса</h2>
+
+    <ul class="feature-list">
+      <li><strong>Статистика в реальном времени</strong> — мониторинг кеша, запросов, документов</li>
+      <li><strong>Drag & Drop загрузка</strong> — удобная загрузка CSV файлов перетаскиванием</li>
+      <li><strong>Управление группами</strong> — просмотр, запуск, удаление с автобэкапом</li>
+      <li><strong>Запуск кластеризации</strong> — для отдельной группы или всех сразу</li>
+      <li><strong>Информация о группах</strong> — детальная статистика и файлы результатов</li>
+      <li><strong>Очистка кеша</strong> — с автоматическим созданием бэкапа БД</li>
+      <li><strong>Автообновление</strong> — данные обновляются каждые 10 секунд</li>
+      <li><strong>Безопасность</strong> — валидация файлов, защита от XSS, автобэкапы</li>
+    </ul>
+
+    <!-- Системные требования -->
+    <h2>⚙️ Системные требования</h2>
+
+    <table>
+      <tr>
+        <th>Компонент</th>
+        <th>Требование</th>
+        <th>Статус</th>
+      </tr>
+      <tr>
+        <td><strong>PHP</strong></td>
+        <td>Версия 7.4 или выше</td>
+        <td>✅ Установлен</td>
+      </tr>
+      <tr>
+        <td><strong>Python</strong></td>
+        <td>Версия 3.8+ (для кластеризации)</td>
+        <td>✅ Установлен</td>
+      </tr>
+      <tr>
+        <td><strong>SQLite</strong></td>
+        <td>Встроен в PHP</td>
+        <td>✅ Доступен</td>
+      </tr>
+      <tr>
+        <td><strong>Браузер</strong></td>
+        <td>Chrome, Edge, Firefox</td>
+        <td>✅ Есть</td>
+      </tr>
+    </table>
+
+    <!-- Структура папок -->
+    <h2>📁 Структура проекта</h2>
+
+    <div class="code" style="color: #00ff00; background: #1e1e1e;">seo_claster/
+      ├── <span style="color: #00bfff;">index.html</span> ← Откройте это в браузере
+      ├── <span style="color: #00bfff;">api.php</span> ← REST API
+      ├── <span style="color: #ff6b6b;">start_manager.bat</span> ← Или запустите это
+      │
+      ├── <span style="color: #ffd700;">semantika/</span> ← CSV файлы с запросами
+      │ ├── group1.csv
+      │ └── group2.csv
+      │
+      └── <span style="color: #ffd700;">output/</span> ← Результаты
+      ├── serp_data.db ← Кеш SERP данных
+      └── <span style="color: #ffd700;">groups/</span> ← Результаты кластеризации
+      ├── <span style="color: #ffd700;">group1/</span>
+      │ ├── clusters.csv
+      │ ├── report.html
+      │ └── hierarchy.json
+      └── <span style="color: #ffd700;">group2/</span>
+      └── ...</div>
+
+    <!-- Решение проблем -->
+    <h2>🐛 Решение проблем</h2>
+
+    <h3>Сервер не запускается</h3>
+    <div class="warning">
+      <strong>Проблема:</strong> При запуске start_manager.bat появляется ошибка
+    </div>
+    <div class="step-box">
+      <strong>Решение:</strong>
+      <ol style="margin-left: 20px;">
+        <li>Проверьте, установлен ли PHP:
+          <div class="code">php --version</div>
+        </li>
+        <li>Проверьте, свободен ли порт 8000:
+          <div class="code">netstat -an | find "8000"</div>
+        </li>
+        <li>Попробуйте другой порт:
+          <div class="code">php -S localhost:8080 index.html</div>
+        </li>
+      </ol>
+    </div>
+
+    <h3>Группы не отображаются</h3>
+    <div class="warning">
+      <strong>Проблема:</strong> В интерфейсе пусто, нет групп
+    </div>
+    <div class="step-box">
+      <strong>Решение:</strong>
+      <ul style="margin-left: 20px;">
+        <li>Убедитесь, что папка <code>semantika/</code> существует</li>
+        <li>Проверьте, что в ней есть CSV файлы</li>
+        <li>Проверьте формат CSV (разделитель должен быть <code>;</code>)</li>
+        <li>Откройте консоль браузера (F12) для проверки ошибок</li>
+      </ul>
+    </div>
+
+    <h3>Кластеризация не запускается</h3>
+    <div class="warning">
+      <strong>Проблема:</strong> При нажатии "Запустить" ничего не происходит
+    </div>
+    <div class="step-box">
+      <strong>Решение:</strong>
+      <ol style="margin-left: 20px;">
+        <li>Проверьте Python:
+          <div class="code">python --version</div>
+        </li>
+        <li>Откройте <code>api.php</code>, строка 13, проверьте путь к Python:
+          <div class="code">define('PYTHON_EXE', 'python');</div>
+          Может потребоваться полный путь:
+          <div class="code">define('PYTHON_EXE', 'C:/Python39/python.exe');</div>
+        </li>
+        <li>Убедитесь, что файл <code>main.py</code> существует в корне проекта</li>
+      </ol>
+    </div>
+
+    <!-- Дополнительные ресурсы -->
+    <h2>📚 Дополнительные ресурсы</h2>
+
+    <div class="info">
+      <ul style="margin-left: 20px;">
+        <li><strong>WEB_MANAGER_README.txt</strong> — полная инструкция с примерами</li>
+        <li><strong>QUICK_START_WEB.txt</strong> — краткая справка</li>
+        <li><strong>demo.html</strong> — визуальная демонстрация интерфейса</li>
+        <li><strong>README.md</strong> — общая документация проекта</li>
+        <li><strong>АРХИТЕКТУРА_ПРОЕКТА.md</strong> — техническая документация</li>
+      </ul>
+    </div>
+
+    <!-- Кнопки действий -->
+    <div class="center">
+      <a href="start_manager.bat" class="btn btn-success">
+        🚀 Запустить сервер
+      </a>
+      <a href="http://localhost:8000" class="btn" target="_blank">
+        🌐 Открыть интерфейс
+      </a>
+      <a href="demo.html" class="btn">
+        👁️ Посмотреть демо
+      </a>
+    </div>
+
+    <div class="success center" style="margin-top: 40px;">
+      <h3 style="margin-bottom: 15px;">✅ Всё готово к работе!</h3>
+      <p>Запустите <strong>start_manager.bat</strong> и откройте <strong>http://localhost:8000</strong></p>
+    </div>
+
+    <!-- Футер -->
+    <div style="text-align: center; margin-top: 40px; padding-top: 20px; border-top: 2px solid #f0f0f0; color: #999;">
+      <p>SEO Cluster Manager © 2024</p>
+      <p style="font-size: 14px; margin-top: 5px;">Современный инструмент для кластеризации запросов</p>
+    </div>
+  </div>
+</body>
+
+</html>

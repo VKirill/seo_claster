@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Тест подключения - SEO Cluster Manager</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .container {
+      max-width: 800px;
+      background: white;
+      border-radius: 20px;
+      padding: 40px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    }
+
+    h1 {
+      color: #667eea;
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    .test-item {
+      background: #f8f9fa;
+      padding: 20px;
+      margin: 15px 0;
+      border-radius: 10px;
+      border-left: 5px solid #ddd;
+    }
+
+    .test-item.success {
+      border-left-color: #28a745;
+      background: #d4edda;
+    }
+
+    .test-item.error {
+      border-left-color: #dc3545;
+      background: #f8d7da;
+    }
+
+    .test-item.pending {
+      border-left-color: #ffc107;
+      background: #fff3cd;
+    }
+
+    .test-title {
+      font-weight: bold;
+      margin-bottom: 10px;
+      font-size: 18px;
+    }
+
+    .test-desc {
+      color: #666;
+      font-size: 14px;
+    }
+
+    .btn {
+      display: block;
+      width: 100%;
+      background: #667eea;
+      color: white;
+      padding: 15px;
+      border: none;
+      border-radius: 10px;
+      font-size: 16px;
+      font-weight: bold;
+      cursor: pointer;
+      margin-top: 20px;
+      transition: all 0.3s;
+    }
+
+    .btn:hover {
+      background: #5568d3;
+      transform: translateY(-2px);
+    }
+
+    .btn:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    pre {
+      background: #2d2d2d;
+      color: #f8f8f2;
+      padding: 15px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin-top: 10px;
+      font-size: 13px;
+    }
+
+    .loading {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 3px solid #f3f3f3;
+      border-top: 3px solid #667eea;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      0% {
+        transform: rotate(0deg);
+      }
+
+      100% {
+        transform: rotate(360deg);
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <h1>🔍 Тест подключения</h1>
+
+    <div id="test-1" class="test-item pending">
+      <div class="test-title">⏳ 1. Проверка доступности сервера</div>
+      <div class="test-desc">Проверяем, запущен ли PHP сервер...</div>
+    </div>
+
+    <div id="test-2" class="test-item pending">
+      <div class="test-title">⏳ 2. Проверка API</div>
+      <div class="test-desc">Проверяем доступность api.php...</div>
+    </div>
+
+    <div id="test-3" class="test-item pending">
+      <div class="test-title">⏳ 3. Проверка базы данных</div>
+      <div class="test-desc">Проверяем статистику кеша...</div>
+    </div>
+
+    <div id="test-4" class="test-item pending">
+      <div class="test-title">⏳ 4. Проверка групп</div>
+      <div class="test-desc">Проверяем загрузку групп запросов...</div>
+    </div>
+
+    <button id="retry-btn" class="btn" onclick="runTests()" disabled>
+      🔄 Повторить тесты
+    </button>
+
+    <button id="open-btn" class="btn" onclick="openManager()" disabled style="display:none; background: #28a745;">
+      ✅ Открыть интерфейс
+    </button>
+
+    <div id="help" style="margin-top: 30px; display: none;">
+      <h3 style="color: #dc3545; margin-bottom: 15px;">❌ Что делать?</h3>
+      <div style="background: #f8d7da; padding: 20px; border-radius: 10px;">
+        <p style="margin-bottom: 15px;"><strong>Сервер не запущен!</strong></p>
+        <p style="margin-bottom: 10px;">Запустите один из файлов:</p>
+        <pre>start_manager.bat
+ИЛИ
+СТАРТ.bat</pre>
+        <p style="margin-top: 15px;">Или выполните команду:</p>
+        <pre>php -S localhost:8000 index.html</pre>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let testsCompleted = false;
+
+    async function runTests() {
+      testsCompleted = false;
+      document.getElementById('retry-btn').disabled = true;
+      document.getElementById('open-btn').style.display = 'none';
+      document.getElementById('help').style.display = 'none';
+
+      // Сброс всех тестов
+      for (let i = 1; i <= 4; i++) {
+        const elem = document.getElementById(`test-${i}`);
+        elem.className = 'test-item pending';
+        elem.innerHTML = `
+                    <div class="test-title">⏳ ${i}. Выполняется...</div>
+                    <div class="test-desc"><span class="loading"></span></div>
+                `;
+      }
+
+      // Тест 1: Доступность сервера
+      try {
+        const response = await fetch('index.html');
+        if (response.ok) {
+          updateTest(1, 'success', 'Проверка доступности сервера', 'Сервер запущен ✅');
+        } else {
+          throw new Error('Сервер недоступен');
+        }
+      } catch (error) {
+        updateTest(1, 'error', 'Проверка доступности сервера',
+          'Сервер не запущен! Запустите start_manager.bat');
+        showHelp();
+        return;
+      }
+
+      // Тест 2: API
+      try {
+        const response = await fetch('api.php?action=get_cache_stats');
+        if (response.ok) {
+          updateTest(2, 'success', 'Проверка API', 'API работает ✅');
+        } else {
+          throw new Error('API недоступен');
+        }
+      } catch (error) {
+        updateTest(2, 'error', 'Проверка API',
+          'API не отвечает! Проверьте api.php');
+        showHelp();
+        return;
+      }
+
+      // Тест 3: База данных
+      try {
+        const response = await fetch('api.php?action=get_cache_stats');
+        const data = await response.json();
+
+        if (data.exists) {
+          updateTest(3, 'success', 'Проверка базы данных',
+            `База данных найдена ✅<br>
+                        Запросов: ${data.queries || 0}<br>
+                        Документов: ${data.documents || 0}<br>
+                        Размер: ${data.size_human || '0 B'}`);
+        } else {
+          updateTest(3, 'success', 'Проверка базы данных',
+            'База данных будет создана при первом использовании ℹ️');
+        }
+      } catch (error) {
+        updateTest(3, 'error', 'Проверка базы данных',
+          'Ошибка при проверке базы данных: ' + error.message);
+      }
+
+      // Тест 4: Группы
+      try {
+        const response = await fetch('api.php?action=list_groups');
+        const groups = await response.json();
+
+        if (groups && groups.length > 0) {
+          updateTest(4, 'success', 'Проверка групп',
+            `Найдено групп: ${groups.length} ✅<br>
+                        ${groups.map(g => `• ${g.name} (${g.queries} запросов)`).join('<br>')}`);
+        } else {
+          updateTest(4, 'success', 'Проверка групп',
+            'Групп не найдено. Загрузите CSV файлы через интерфейс ℹ️');
+        }
+      } catch (error) {
+        updateTest(4, 'error', 'Проверка групп',
+          'Ошибка при загрузке групп: ' + error.message);
+      }
+
+      // Все тесты пройдены
+      testsCompleted = true;
+      document.getElementById('retry-btn').disabled = false;
+      document.getElementById('open-btn').style.display = 'block';
+    }
+
+    function updateTest(num, status, title, desc) {
+      const elem = document.getElementById(`test-${num}`);
+      elem.className = `test-item ${status}`;
+
+      const icon = status === 'success' ? '✅' : status === 'error' ? '❌' : '⏳';
+
+      elem.innerHTML = `
+                <div class="test-title">${icon} ${num}. ${title}</div>
+                <div class="test-desc">${desc}</div>
+            `;
+    }
+
+    function showHelp() {
+      document.getElementById('help').style.display = 'block';
+      document.getElementById('retry-btn').disabled = false;
+    }
+
+    function openManager() {
+      window.location.href = 'index.html';
+    }
+
+    // Автоматический запуск тестов при загрузке
+    window.addEventListener('load', () => {
+      setTimeout(runTests, 500);
+    });
+  </script>
+</body>
+
+</html>

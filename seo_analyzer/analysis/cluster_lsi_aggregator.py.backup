@@ -1,0 +1,579 @@
+"""
+Cluster LSI Aggregator Module
+Агрегация LSI фраз на уровне кластеров
+"""
+
+import pandas as pd
+from typing import Dict, List, Any
+from collections import Counter
+
+
+class ClusterLSIAggregator:
+    """Агрегатор LSI фраз для кластеров"""
+    
+    def __init__(self, top_n_per_cluster: int = 10):
+        """
+        Args:
+            top_n_per_cluster: Количество топ LSI фраз на кластер
+        """
+        self.top_n_per_cluster = top_n_per_cluster
+    
+    def aggregate_cluster_lsi(
+        self,
+        df: pd.DataFrame,
+        cluster_column: str = 'semantic_cluster_id'
+    ) -> Dict[int, List[Dict[str, Any]]]:
+        """
+        Агрегировать LSI фразы для каждого кластера
+        
+        Args:
+            df: DataFrame с колонками [cluster_column, 'lsi_phrases']
+            cluster_column: Название колонки с ID кластера
+            
+        Returns:
+            Dict {cluster_id: [top_lsi_phrases]}
+        """
+        if cluster_column not in df.columns:
+            print(f"⚠️  Колонка '{cluster_column}' не найдена")
+            return {}
+        
+        if 'lsi_phrases' not in df.columns:
+            print("⚠️  Колонка 'lsi_phrases' не найдена")
+            return {}
+        
+        cluster_lsi = {}
+        
+        # Группируем по кластерам
+        clusters_without_lsi = []
+        clusters_with_empty_lsi = []
+        
+        for cluster_id, group in df.groupby(cluster_column):
+            # Собираем все LSI фразы из всех запросов кластера
+            all_lsi = []
+            queries_with_lsi = 0
+            queries_without_lsi = 0
+            
+            for idx, row in group.iterrows():
+                lsi_list = row['lsi_phrases']
+                
+                # Парсим JSON строку если нужно
+                if isinstance(lsi_list, str):
+                    import json
+                    try:
+                        lsi_list = json.loads(lsi_list) if lsi_list.strip() else []
+                    except (json.JSONDecodeError, TypeError):
+                        # Если не удалось распарсить - пропускаем
+                        queries_without_lsi += 1
+                        continue
+                
+                # Проверяем что это список и он не пустой
+                if isinstance(lsi_list, list) and len(lsi_list) > 0:
+                    # Нормализуем каждый элемент списка
+                    items_added = 0
+                    for item in lsi_list:
+                        if isinstance(item, dict):
+                            # Правильный формат: словарь с ключом 'phrase'
+                            phrase = item.get('phrase', '')
+                            if phrase:  # Проверяем что фраза не пустая
+                                all_lsi.append(item)
+                                items_added += 1
+                            # Если словарь без ключа 'phrase' - пропускаем
+                        elif isinstance(item, str):
+                            # Если это строка - оборачиваем в словарь
+                            if item.strip():  # Проверяем что строка не пустая
+                                all_lsi.append({
+                                    'phrase': item.strip(),
+                                    'frequency': 1,
+                                    'source': 'unknown'
+                                })
+                                items_added += 1
+                        # Иначе пропускаем (неправильный формат)
+                    
+                    if items_added > 0:
+                        queries_with_lsi += 1
+                    else:
+                        # Список был не пустой, но все элементы были пустыми или неправильного формата
+                        queries_without_lsi += 1
+                else:
+                    queries_without_lsi += 1
+            
+            # Агрегируем
+            if all_lsi:
+                aggregated = self._aggregate_phrases(all_lsi)
+                cluster_lsi[cluster_id] = aggregated
+            else:
+                cluster_lsi[cluster_id] = []
+                if queries_without_lsi > 0:
+                    clusters_without_lsi.append((cluster_id, len(group), queries_without_lsi))
+                if queries_with_lsi == 0:
+                    clusters_with_empty_lsi.append((cluster_id, len(group)))
+        
+        # Диагностика
+        if clusters_without_lsi:
+            print(f"⚠️  Найдено {len(clusters_without_lsi)} кластеров, где не у всех запросов есть LSI фразы")
+            if len(clusters_without_lsi) <= 10:
+                for cid, total, without in clusters_without_lsi[:10]:
+                    print(f"   Кластер {cid}: {without}/{total} запросов без LSI")
+        
+        if clusters_with_empty_lsi:
+            print(f"⚠️  Найдено {len(clusters_with_empty_lsi)} кластеров без LSI фраз (у всех запросов пустые LSI)")
+            if len(clusters_with_empty_lsi) <= 10:
+                for cid, total in clusters_with_empty_lsi[:10]:
+                    print(f"   Кластер {cid}: {total} запросов, все без LSI")
+        
+        return cluster_lsi
+    
+    def _aggregate_phrases(
+        self,
+        phrases_list: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Агрегировать список LSI фраз, оставляя только самые специфичные
+        
+        Для создания контента нужны полные фразы, а не части.
+        Удаляем короткие фразы, которые входят в более длинные.
+        
+        Args:
+            phrases_list: Список фраз с частотой и источником
+            
+        Returns:
+            Топ агрегированных фраз без дублирующихся подстрок
+        """
+        # Группируем по тексту фразы
+        phrase_data = {}
+        
+        for item in phrases_list:
+            # Нормализация: обрабатываем разные форматы данных
+            if not isinstance(item, dict):
+                # Если элемент не словарь - пропускаем
+                continue
+            
+            # Извлекаем phrase_text с проверкой разных форматов
+            phrase_text = item.get('phrase', '')
+            
+            # Если phrase_text - словарь (неправильный формат), пытаемся извлечь строку
+            if isinstance(phrase_text, dict):
+                # Возможно, это вложенная структура - пытаемся найти строку
+                phrase_text = phrase_text.get('phrase', '') if isinstance(phrase_text.get('phrase'), str) else ''
+            
+            # Если phrase_text все еще не строка - пропускаем
+            if not isinstance(phrase_text, str):
+                continue
+            
+            # Если строка пустая - пропускаем
+            if not phrase_text.strip():
+                continue
+            
+            frequency = item.get('frequency', 1)
+            source = item.get('source', 'unknown')
+            
+            if phrase_text not in phrase_data:
+                phrase_data[phrase_text] = {
+                    'total_frequency': 0,
+                    'sources': [],
+                    'queries_count': 0,
+                    'word_count': len(phrase_text.split())
+                }
+            
+            phrase_data[phrase_text]['total_frequency'] += frequency
+            phrase_data[phrase_text]['sources'].append(source)
+            phrase_data[phrase_text]['queries_count'] += 1
+        
+        # Удаляем дублирующиеся подстроки
+        phrase_data = self._remove_substring_duplicates(phrase_data)
+        
+        # Сортируем: сначала по длине (специфичности), потом по частоте
+        sorted_phrases = sorted(
+            phrase_data.items(),
+            key=lambda x: (x[1]['word_count'], x[1]['total_frequency']),
+            reverse=True
+        )[:self.top_n_per_cluster]
+        
+        # Формируем результат
+        result = []
+        for phrase_text, data in sorted_phrases:
+            # Основной источник
+            source_counter = Counter(data['sources'])
+            main_source = source_counter.most_common(1)[0][0]
+            
+            result.append({
+                'phrase': phrase_text,
+                'frequency': data['total_frequency'],
+                'queries_count': data['queries_count'],
+                'main_source': main_source,
+                'relevance_score': self._calculate_relevance(
+                    data['total_frequency'],
+                    data['queries_count'],
+                    data['word_count']
+                )
+            })
+        
+        return result
+    
+    def _remove_substring_duplicates(
+        self,
+        phrase_data: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Удалить короткие фразы, которые полностью входят в более длинные
+        
+        Пример:
+            "система контроль" удаляется, если есть "система контроль управление доступ"
+        
+        Логика: если короткая фраза входит в длинную и её частота не более чем
+        в 2 раза выше, то короткую удаляем (она не несет доп. информации)
+        
+        Args:
+            phrase_data: Словарь с данными фраз
+            
+        Returns:
+            Отфильтрованный словарь фраз
+        """
+        phrases_by_length = sorted(
+            phrase_data.keys(),
+            key=lambda x: len(x.split()),
+            reverse=True
+        )
+        
+        to_remove = set()
+        
+        for long_phrase in phrases_by_length:
+            if long_phrase in to_remove:
+                continue
+                
+            long_freq = phrase_data[long_phrase]['total_frequency']
+            
+            # Проверяем все более короткие фразы
+            for short_phrase in phrases_by_length:
+                if short_phrase in to_remove:
+                    continue
+                
+                if len(short_phrase.split()) >= len(long_phrase.split()):
+                    continue
+                
+                # Проверяем вхождение подстроки
+                if self._is_substring(short_phrase, long_phrase):
+                    short_freq = phrase_data[short_phrase]['total_frequency']
+                    
+                    # Удаляем короткую если она не намного частотнее (не более 2x)
+                    if short_freq <= long_freq * 2:
+                        to_remove.add(short_phrase)
+        
+        return {
+            phrase: data 
+            for phrase, data in phrase_data.items() 
+            if phrase not in to_remove
+        }
+    
+    def _is_substring(self, short: str, long: str) -> bool:
+        """
+        Проверить входит ли короткая фраза в длинную (все слова подряд)
+        
+        Args:
+            short: Короткая фраза (например "система контроль")
+            long: Длинная фраза (например "система контроль управление")
+        
+        Returns:
+            True если короткая полностью входит в длинную
+        """
+        short_words = short.split()
+        long_words = long.split()
+        
+        if len(short_words) >= len(long_words):
+            return False
+        
+        # Ищем последовательное вхождение
+        for i in range(len(long_words) - len(short_words) + 1):
+            if long_words[i:i + len(short_words)] == short_words:
+                return True
+        
+        return False
+    
+    def _calculate_relevance(
+        self,
+        total_frequency: int,
+        queries_count: int,
+        word_count: int
+    ) -> float:
+        """
+        Рассчитать релевантность фразы для кластера с учетом специфичности
+        
+        Более длинные фразы получают бонус к релевантности
+        
+        Args:
+            total_frequency: Общая частота встречаемости
+            queries_count: В скольких запросах встречается
+            word_count: Количество слов в фразе
+        
+        Returns:
+            Оценка релевантности (выше = лучше)
+        """
+        # Базовая формула
+        base_score = total_frequency * (1 + queries_count * 0.1)
+        
+        # Бонус за специфичность (длинные фразы)
+        # 2-граммы: множитель 1.0
+        # 3-граммы: множитель 1.3
+        # 4-граммы: множитель 1.6
+        specificity_bonus = 1.0 + (word_count - 2) * 0.3
+        
+        return base_score * specificity_bonus
+    
+    def add_cluster_lsi_to_dataframe(
+        self,
+        df: pd.DataFrame,
+        cluster_lsi: Dict[int, List[Dict]],
+        cluster_column: str = 'semantic_cluster_id'
+    ) -> pd.DataFrame:
+        """
+        Добавить агрегированные LSI фразы в DataFrame
+        
+        Args:
+            df: DataFrame
+            cluster_lsi: Агрегированные LSI по кластерам
+            cluster_column: Колонка с ID кластера
+            
+        Returns:
+            DataFrame с новой колонкой 'cluster_lsi_phrases'
+        """
+        # Создаем маппинг cluster_id -> LSI phrases
+        cluster_to_lsi = {}
+        cluster_to_lsi_str = {}
+        
+        for cluster_id, lsi_list in cluster_lsi.items():
+            # Сохраняем топ-30 как список словарей (для JSON/Excel)
+            cluster_to_lsi[cluster_id] = lsi_list[:30] if lsi_list else []
+            
+            # Также создаем строковое представление (для CSV)
+            top_phrases = []
+            for item in lsi_list[:30]:
+                if isinstance(item, dict):
+                    phrase = item.get('phrase', '')
+                    if phrase:
+                        top_phrases.append(phrase)
+                elif isinstance(item, str):
+                    if item:
+                        top_phrases.append(item)
+            cluster_to_lsi_str[cluster_id] = ', '.join(top_phrases) if top_phrases else ''
+        
+        # Добавляем колонку с полными данными (список словарей)
+        df['cluster_lsi_phrases'] = df[cluster_column].map(cluster_to_lsi)
+        
+        # Диагностика: проверяем сколько записей получили LSI фразы
+        mapped_count = df['cluster_lsi_phrases'].notna().sum()
+        empty_count = (df['cluster_lsi_phrases'].isna() | (df['cluster_lsi_phrases'] == '')).sum()
+        
+        # Заполняем пустые значения пустыми списками
+        df['cluster_lsi_phrases'] = df['cluster_lsi_phrases'].fillna('').apply(
+            lambda x: x if isinstance(x, list) else []
+        )
+        
+        # Проверяем сколько записей имеют непустые LSI фразы после заполнения
+        non_empty_count = df['cluster_lsi_phrases'].apply(lambda x: isinstance(x, list) and len(x) > 0).sum()
+        
+        # Диагностика для кластеров без LSI
+        clusters_without_lsi = []
+        queries_without_cluster = 0
+        queries_with_cluster_but_no_lsi = 0
+        
+        for cluster_id in df[cluster_column].unique():
+            cluster_df = df[df[cluster_column] == cluster_id]
+            cluster_lsi_data = cluster_df['cluster_lsi_phrases'].iloc[0] if len(cluster_df) > 0 else []
+            
+            if cluster_id == -1:
+                # Запросы без кластера
+                queries_without_cluster += len(cluster_df)
+            elif not isinstance(cluster_lsi_data, list) or len(cluster_lsi_data) == 0:
+                clusters_without_lsi.append(cluster_id)
+                queries_with_cluster_but_no_lsi += len(cluster_df)
+        
+        if queries_without_cluster > 0:
+            print(f"ℹ️  Запросов без кластера (semantic_cluster_id = -1): {queries_without_cluster}")
+        
+        if clusters_without_lsi:
+            print(f"⚠️  Найдено {len(clusters_without_lsi)} кластеров без LSI фраз после агрегации")
+            print(f"   Запросов в таких кластерах: {queries_with_cluster_but_no_lsi}")
+            if len(clusters_without_lsi) <= 20:
+                print(f"   ID кластеров: {clusters_without_lsi[:20]}")
+        
+        print(f"📊 Статистика LSI фраз кластеров:")
+        print(f"   Записей с маппингом: {mapped_count}/{len(df)}")
+        print(f"   Записей с непустыми LSI: {non_empty_count}/{len(df)}")
+        print(f"   Кластеров без LSI: {len(clusters_without_lsi)}")
+        if queries_without_cluster > 0 or queries_with_cluster_but_no_lsi > 0:
+            print(f"   Запросов без LSI кластера: {queries_without_cluster + queries_with_cluster_but_no_lsi}")
+        
+        # Строковая версия для CSV
+        df['cluster_lsi_phrases_str'] = df[cluster_column].map(cluster_to_lsi_str)
+        df['cluster_lsi_phrases_str'] = df['cluster_lsi_phrases_str'].fillna('')
+        
+        # Также сохраняем полный список (все фразы, не только топ-30)
+        df['cluster_lsi_full'] = df[cluster_column].map(
+            lambda x: cluster_lsi.get(x, [])
+        )
+        
+        return df
+    
+    def aggregate_cluster_serp_urls(
+        self,
+        df: pd.DataFrame,
+        cluster_column: str = 'semantic_cluster_id',
+        serp_urls_column: str = 'serp_urls',
+        top_n: int = 10
+    ) -> Dict[int, List[str]]:
+        """
+        Агрегировать общие SERP URL для каждого кластера
+        
+        Args:
+            df: DataFrame с колонками [cluster_column, serp_urls_column]
+            cluster_column: Название колонки с ID кластера
+            serp_urls_column: Название колонки с SERP URL
+            top_n: Количество топ URL на кластер
+            
+        Returns:
+            Dict {cluster_id: [top_common_urls]}
+        """
+        if cluster_column not in df.columns:
+            print(f"⚠️  Колонка '{cluster_column}' не найдена")
+            return {}
+        
+        if serp_urls_column not in df.columns:
+            print(f"⚠️  Колонка '{serp_urls_column}' не найдена")
+            return {}
+        
+        cluster_urls = {}
+        
+        # Группируем по кластерам
+        for cluster_id, group in df.groupby(cluster_column):
+            # Собираем все URL из всех запросов кластера
+            url_counter = Counter()
+            
+            for urls_list in group[serp_urls_column]:
+                if isinstance(urls_list, list):
+                    url_counter.update(urls_list)
+            
+            # Топ URL по частоте встречаемости
+            if url_counter:
+                top_urls = [url for url, count in url_counter.most_common(top_n)]
+                cluster_urls[cluster_id] = top_urls
+            else:
+                cluster_urls[cluster_id] = []
+        
+        return cluster_urls
+    
+    def add_cluster_serp_urls_to_dataframe(
+        self,
+        df: pd.DataFrame,
+        cluster_urls: Dict[int, List[str]],
+        cluster_column: str = 'semantic_cluster_id'
+    ) -> pd.DataFrame:
+        """
+        Добавить агрегированные SERP URL в DataFrame
+        
+        Args:
+            df: DataFrame
+            cluster_urls: Агрегированные URL по кластерам
+            cluster_column: Колонка с ID кластера
+            
+        Returns:
+            DataFrame с новой колонкой 'cluster_common_urls'
+        """
+        # Создаем маппинг cluster_id -> URL string
+        cluster_to_urls = {}
+        for cluster_id, urls_list in cluster_urls.items():
+            # Формируем строку с топ URL
+            cluster_to_urls[cluster_id] = ', '.join(urls_list)
+        
+        # Добавляем колонку с общими URL кластера (не перезаписываем индивидуальные!)
+        df['cluster_common_urls'] = df[cluster_column].map(cluster_to_urls)
+        df['cluster_common_urls'] = df['cluster_common_urls'].fillna('')
+        
+        return df
+    
+    def export_cluster_lsi(
+        self,
+        cluster_lsi: Dict[int, List[Dict]],
+        output_path: str
+    ):
+        """
+        Экспортировать LSI фразы кластеров в CSV
+        
+        Args:
+            cluster_lsi: Агрегированные LSI
+            output_path: Путь для сохранения
+        """
+        rows = []
+        
+        for cluster_id, phrases in cluster_lsi.items():
+            for phrase_data in phrases:
+                rows.append({
+                    'cluster_id': cluster_id,
+                    'phrase': phrase_data['phrase'],
+                    'frequency': phrase_data['frequency'],
+                    'queries_count': phrase_data['queries_count'],
+                    'main_source': phrase_data['main_source'],
+                    'relevance_score': round(phrase_data['relevance_score'], 2)
+                })
+        
+        export_df = pd.DataFrame(rows)
+        export_df.to_csv(output_path, index=False, encoding='utf-8-sig')
+        
+        print(f"✓ Экспорт LSI фраз кластеров: {output_path}")
+        print(f"  Всего кластеров: {len(cluster_lsi)}")
+        print(f"  Всего уникальных фраз: {len(export_df)}")
+    
+    def get_cluster_keywords_for_content(
+        self,
+        cluster_id: int,
+        cluster_lsi: Dict[int, List[Dict]],
+        top_n: int = 20
+    ) -> List[str]:
+        """
+        Получить список ключевых слов для создания контента
+        
+        Args:
+            cluster_id: ID кластера
+            cluster_lsi: Агрегированные LSI
+            top_n: Количество фраз
+            
+        Returns:
+            Список ключевых фраз
+        """
+        if cluster_id not in cluster_lsi:
+            return []
+        
+        phrases = cluster_lsi[cluster_id][:top_n]
+        return [item['phrase'] for item in phrases]
+    
+    def get_statistics(
+        self,
+        cluster_lsi: Dict[int, List[Dict]]
+    ) -> Dict[str, Any]:
+        """
+        Получить статистику по LSI фразам
+        
+        Returns:
+            Dict со статистикой
+        """
+        total_clusters = len(cluster_lsi)
+        total_phrases = sum(len(phrases) for phrases in cluster_lsi.values())
+        
+        # Средние метрики
+        all_frequencies = []
+        all_queries_counts = []
+        
+        for phrases in cluster_lsi.values():
+            for phrase in phrases:
+                all_frequencies.append(phrase['frequency'])
+                all_queries_counts.append(phrase['queries_count'])
+        
+        stats = {
+            'total_clusters': total_clusters,
+            'total_unique_phrases': total_phrases,
+            'avg_phrases_per_cluster': round(total_phrases / total_clusters, 2) if total_clusters > 0 else 0,
+            'avg_phrase_frequency': round(sum(all_frequencies) / len(all_frequencies), 2) if all_frequencies else 0,
+            'avg_queries_per_phrase': round(sum(all_queries_counts) / len(all_queries_counts), 2) if all_queries_counts else 0,
+        }
+        
+        return stats
+

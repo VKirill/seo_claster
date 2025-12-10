@@ -1,0 +1,534 @@
+"""
+SERP API Client
+Клиент для работы с xmlstock API с retry логикой
+"""
+
+import asyncio
+import aiohttp
+import re
+import time
+from typing import Dict, Any, Optional
+from urllib.parse import urlencode
+
+from seo_analyzer.core.serp_data_enricher import SERPDataEnricher
+from seo_analyzer.core.lsi_extractor import LSIExtractor
+from .api_semaphore import get_api_semaphore
+
+
+class SERPAPIClient:
+    """Клиент для работы с xmlstock API"""
+    
+    # Глобальный флаг перегрузки сервера (503)
+    # Если сервер вернул 503, все запросы ждут 60 сек перед следующей попыткой
+    _last_503_time: Optional[float] = None
+    _503_lock: Optional[asyncio.Lock] = None
+    
+    @classmethod
+    def _get_503_lock(cls) -> asyncio.Lock:
+        """Получить или создать Lock для синхронизации"""
+        if cls._503_lock is None:
+            cls._503_lock = asyncio.Lock()
+        return cls._503_lock
+    
+    @classmethod
+    async def _check_and_wait_for_503(cls):
+        """Проверить, был ли недавно 503, и если да - подождать"""
+        async with cls._get_503_lock():
+            if cls._last_503_time is not None:
+                time_since_503 = time.time() - cls._last_503_time
+                if time_since_503 < 60:
+                    wait_time = 60 - time_since_503
+                    print(f"   ⚠️  Сервер был перегружен (503) {time_since_503:.1f} сек назад. Ожидание {wait_time:.1f} сек...")
+                    await asyncio.sleep(wait_time)
+                    cls._last_503_time = None  # Сбрасываем после ожидания
+    
+    @classmethod
+    async def _mark_503_error(cls):
+        """Отметить что сервер вернул 503"""
+        async with cls._get_503_lock():
+            cls._last_503_time = time.time()
+    
+    def __init__(
+        self,
+        api_key: str,
+        lr: int = 213,
+        max_retries: int = 5,
+        retry_delay: int = 5,
+        timeout: int = 10,
+        max_concurrent: int = 50
+    ):
+        """
+        Args:
+            api_key: API ключ xmlstock в формате "user:key"
+            lr: Регион (213 = Москва)
+            max_retries: Максимум попыток при ошибках
+            retry_delay: Задержка между попытками (сек)
+            timeout: Таймаут запроса (сек)
+            max_concurrent: Максимум одновременных запросов (глобально)
+        """
+        self.api_key = api_key
+        self.lr = lr
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.timeout = timeout
+        
+        # Enricher и LSI
+        self.enricher = SERPDataEnricher()
+        self.lsi_extractor = LSIExtractor()
+        
+        # Глобальный семафор для контроля параллельности
+        self.api_semaphore = get_api_semaphore(max_concurrent)
+        
+        # Переиспользуемая сессия для всех запросов (connection pooling)
+        self._session: Optional[aiohttp.ClientSession] = None
+    
+    async def _ensure_session(self):
+        """Создать сессию если её нет"""
+        if self._session is None or self._session.closed:
+            # Закрываем старую сессию если есть (на всякий случай)
+            if self._session is not None:
+                try:
+                    if not self._session.closed:
+                        await self._session.close()
+                    # Закрываем connector если есть
+                    if hasattr(self._session, '_connector') and self._session._connector:
+                        await self._session._connector.close()
+                    await asyncio.sleep(0.1)
+                except Exception:
+                    # Игнорируем ошибки при закрытии
+                    pass
+                finally:
+                    self._session = None
+            self._session = aiohttp.ClientSession()
+    
+    async def close(self):
+        """Закрыть сессию"""
+        if self._session:
+            try:
+                if not self._session.closed:
+                    await self._session.close()
+                # Закрываем connector если есть
+                if hasattr(self._session, '_connector') and self._session._connector:
+                    await self._session._connector.close()
+                await asyncio.sleep(0.1)
+            except Exception:
+                # Игнорируем ошибки при закрытии
+                pass
+            finally:
+                self._session = None
+    
+    async def fetch_serp_data(self, query: str) -> Dict[str, Any]:
+        """
+        Запрос к xmlstock API с retry логикой и глобальным контролем параллельности
+        
+        Args:
+            query: Поисковый запрос
+            
+        Returns:
+            Dict с SERP метриками, документами и LSI фразами
+        """
+        # Убедимся что сессия создана
+        await self._ensure_session()
+        
+        # Захватываем слот в глобальном семафоре
+        # Это гарантирует что во всем приложении не более 50 одновременных запросов
+        async with self.api_semaphore:
+            return await self._fetch_serp_data_internal(query)
+    
+    async def _fetch_serp_data_internal(self, query: str, use_async_mode: bool = True) -> Dict[str, Any]:
+        """
+        Внутренний метод для выполнения запроса к API
+        
+        Args:
+            query: Поисковый запрос
+            use_async_mode: Использовать асинхронный режим (delayed=1)
+            
+        Returns:
+            Dict с SERP метриками, документами и LSI фразами
+        """
+        url = "https://xmlstock.com/yandex/xml/"
+        
+        # Парсинг API ключа (поддерживаем два формата: "user:key" и просто "key")
+        if ':' in self.api_key:
+            user, key = self.api_key.split(':', 1)
+        else:
+            # Если только ключ без user - используем ключ и для user и для key
+            user = self.api_key
+            key = self.api_key
+        
+        # Если асинхронный режим - сначала получаем req_id
+        if use_async_mode:
+            return await self._fetch_async_mode(url, user, key, query)
+        
+        # Гибридный режим (по умолчанию)
+        params = {
+            'user': user,
+            'key': key,
+            'query': query,
+            'lr': self.lr,
+            'groupby': 'attr=d.mode=deep.groups-on-page=20.docs-in-group=1',
+            'maxpassages': 2,
+            'filter': 'moderate'
+        }
+        
+        last_error = None
+        first_error_logged = False
+        error_count = getattr(self, '_error_count', 0)
+    
+    async def _fetch_async_mode(self, url: str, user: str, key: str, query: str) -> Dict[str, Any]:
+        """
+        Асинхронный режим XMLStock: получаем req_id, затем результат
+        
+        Преимущества:
+        - Списание 1 раз при получении req_id
+        - Можно запрашивать результат много раз
+        - Запросы кэшируются на стороне XMLStock
+        """
+        # Шаг 1: Отправляем запрос с delayed=1 для получения req_id
+        params_delayed = {
+            'user': user,
+            'key': key,
+            'query': query,
+            'lr': self.lr,
+            'groupby': 'attr=d.mode=deep.groups-on-page=20.docs-in-group=1',
+            'maxpassages': 2,
+            'filter': 'moderate',
+            'delayed': '1'  # Асинхронный режим
+        }
+        
+        # Retry логика для получения req_id при ошибках 503
+        max_retries_req_id = 3
+        last_error_req_id = None
+        
+        for req_id_attempt in range(max_retries_req_id):
+            # Проверяем, был ли недавно 503 от других запросов
+            await self._check_and_wait_for_503()
+            
+            try:
+                async with self._session.get(url, params=params_delayed, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    # Проверяем HTTP статус код
+                    if response.status != 200:
+                        error_text = await response.text()
+                        # Пытаемся извлечь информацию об ошибке из HTML
+                        if response.status == 503:
+                            # Отмечаем глобально что сервер перегружен
+                            await self._mark_503_error()
+                            
+                            # Проверяем на HTML страницу с ошибкой
+                            if '<html' in error_text.lower() or '<title>' in error_text.lower():
+                                title_match = re.search(r'<title>([^<]+)</title>', error_text, re.IGNORECASE)
+                                title = title_match.group(1) if title_match else "Service Temporarily Unavailable"
+                                last_error_req_id = f"HTTP {response.status} {title} (сервер временно недоступен)"
+                                
+                                # Если не последняя попытка - ждём 60 сек и повторяем
+                                if req_id_attempt < max_retries_req_id - 1:
+                                    print(f"   ⚠️  Сервер перегружен (503) при получении req_id для '{query[:50]}...'. Ожидание 60 сек...")
+                                    await asyncio.sleep(60)
+                                    continue  # Повторяем попытку
+                                
+                                raise Exception(last_error_req_id)
+                            else:
+                                last_error_req_id = f"HTTP {response.status}: {error_text[:200]}"
+                                if req_id_attempt < max_retries_req_id - 1:
+                                    print(f"   ⚠️  Сервер перегружен (503) при получении req_id для '{query[:50]}...'. Ожидание 60 сек...")
+                                    await asyncio.sleep(60)
+                                    continue
+                                raise Exception(last_error_req_id)
+                        last_error_req_id = f"HTTP {response.status}: {error_text[:200]}"
+                        raise Exception(last_error_req_id)
+                    
+                    xml_text = await response.text()
+                    
+                    # Проверяем что ответ не HTML (может быть ошибка сервера)
+                    if xml_text.strip().lower().startswith('<html'):
+                        # Пытаемся извлечь информацию об ошибке из HTML
+                        title_match = re.search(r'<title>([^<]+)</title>', xml_text, re.IGNORECASE)
+                        title = title_match.group(1) if title_match else "Server Error"
+                        h1_match = re.search(r'<h1[^>]*>([^<]+)</h1>', xml_text, re.IGNORECASE)
+                        h1 = h1_match.group(1) if h1_match else ""
+                        error_msg = f"{title}" + (f": {h1}" if h1 else "")
+                        last_error_req_id = f"Сервер вернул HTML вместо XML: {error_msg}"
+                        
+                        # Если это 503 ошибка и не последняя попытка - ждём и повторяем
+                        if ('503' in error_msg or 'Service Temporarily Unavailable' in error_msg) and req_id_attempt < max_retries_req_id - 1:
+                            print(f"   ⚠️  Сервер перегружен (503) при получении req_id для '{query[:50]}...'. Ожидание 60 сек...")
+                            await asyncio.sleep(60)
+                            continue
+                        
+                        raise Exception(last_error_req_id)
+                    
+                    # Извлекаем req_id из ответа
+                    req_id_match = re.search(r'<req_id>([^<]+)</req_id>', xml_text)
+                    if not req_id_match:
+                        last_error_req_id = f"Failed to get req_id: {xml_text[:200]}"
+                        raise Exception(last_error_req_id)
+                    
+                    req_id = req_id_match.group(1)
+                    break  # Успешно получили req_id, выходим из цикла
+                    
+            except Exception as e:
+                last_error_req_id = str(e)
+                # Если это не последняя попытка и ошибка 503 - уже обработано выше
+                if req_id_attempt >= max_retries_req_id - 1:
+                    break  # Все попытки исчерпаны
+        
+        # Если не удалось получить req_id после всех попыток
+        if 'req_id' not in locals():
+            return {
+                'query': query,
+                'lr': self.lr,
+                'xml_response': None,
+                'error': f"Failed to get req_id after {max_retries_req_id} attempts: {last_error_req_id}",
+                'metrics': self.enricher._get_empty_metrics(),
+                'documents': [],
+                'lsi_phrases': []
+            }
+        
+        # Шаг 2: Запрашиваем результат по req_id с retry
+        params_result = {
+            'user': user,
+            'key': key,
+            'req_id': req_id
+        }
+        
+        last_error = None
+        
+        # Пробуем получить результат (до 10 попыток с увеличивающейся задержкой)
+        for attempt in range(10):
+            # Проверяем, был ли недавно 503 от других запросов
+            await self._check_and_wait_for_503()
+            
+            # Задержка перед попыткой (кроме первой)
+            if attempt > 0:
+                # Если предыдущая ошибка была 503 - ждём 60 сек, иначе обычная задержка
+                if '503' in str(last_error) if last_error else False:
+                    delay = 60
+                    print(f"   ⚠️  Сервер перегружен (503) для запроса '{query[:50]}...'. Ожидание {delay} сек...")
+                else:
+                    # Первые 3 попытки - по 10 сек, затем по 20 сек
+                    delay = 10 if attempt < 3 else 20
+                await asyncio.sleep(delay)
+            
+            try:
+                async with self._session.get(url, params=params_result, timeout=aiohttp.ClientTimeout(total=self.timeout)) as response:
+                    # Проверяем HTTP статус код
+                    if response.status != 200:
+                        error_text = await response.text()
+                        # Пытаемся извлечь информацию об ошибке из HTML
+                        if response.status == 503:
+                            # Отмечаем глобально что сервер перегружен
+                            await self._mark_503_error()
+                            
+                            if '<html' in error_text.lower() or '<title>' in error_text.lower():
+                                title_match = re.search(r'<title>([^<]+)</title>', error_text, re.IGNORECASE)
+                                title = title_match.group(1) if title_match else "Service Temporarily Unavailable"
+                                last_error = f"HTTP {response.status} {title} (сервер временно недоступен)"
+                                continue  # Повторим попытку с задержкой 60 сек
+                            else:
+                                last_error = f"HTTP {response.status}: {error_text[:200]}"
+                                continue  # Повторим попытку с задержкой 60 сек
+                        last_error = f"HTTP {response.status}: {error_text[:200]}"
+                        continue  # Повторим попытку
+                    
+                    xml_text = await response.text()
+                    
+                    # Проверяем что ответ не HTML (может быть ошибка сервера)
+                    if xml_text.strip().lower().startswith('<html'):
+                        title_match = re.search(r'<title>([^<]+)</title>', xml_text, re.IGNORECASE)
+                        title = title_match.group(1) if title_match else "Server Error"
+                        h1_match = re.search(r'<h1[^>]*>([^<]+)</h1>', xml_text, re.IGNORECASE)
+                        h1 = h1_match.group(1) if h1_match else ""
+                        error_msg = f"{title}" + (f": {h1}" if h1 else "")
+                        # Если это 503 ошибка - помечаем для задержки 60 сек
+                        if '503' in error_msg or 'Service Temporarily Unavailable' in error_msg:
+                            await self._mark_503_error()
+                            last_error = f"HTTP 503 {error_msg}"
+                        else:
+                            last_error = f"Сервер вернул HTML вместо XML: {error_msg}"
+                        continue  # Повторим попытку
+                    
+                    # Проверяем на ошибку 202 (еще не готово)
+                    if 'code="202"' in xml_text or 'не обработан' in xml_text:
+                        last_error = "Result not ready yet (202)"
+                        continue  # Повторим попытку
+                    
+                    # Проверяем на другие ошибки
+                    if '<error' in xml_text:
+                        raise Exception(f"XMLStock error: {xml_text[:200]}")
+                    
+                    # Обогащаем данные
+                    enriched = self.enricher.enrich_from_serp(xml_text, query)
+                    
+                    if enriched.get('error'):
+                        raise Exception(enriched['error'])
+                    
+                    # Извлекаем LSI
+                    lsi_phrases = self.lsi_extractor.extract_from_serp_documents(
+                        enriched['documents'],
+                        query
+                    )
+                    
+                    return {
+                        'query': query,
+                        'lr': self.lr,
+                        'xml_response': xml_text,
+                        'metrics': enriched['metrics'],
+                        'documents': enriched['documents'],
+                        'lsi_phrases': lsi_phrases,
+                        'error': None
+                    }
+                    
+            except Exception as e:
+                last_error = str(e)
+        
+        # Не получилось за 10 попыток
+        return {
+            'query': query,
+            'lr': self.lr,
+            'xml_response': None,
+            'error': f"Async mode failed after 10 attempts (req_id={req_id}): {last_error}",
+            'metrics': self.enricher._get_empty_metrics(),
+            'documents': [],
+            'lsi_phrases': []
+        }
+    
+    async def _fetch_hybrid_mode(self, url: str, params: Dict[str, Any], query: str) -> Dict[str, Any]:
+        """Гибридный режим (текущая реализация)"""
+        last_error = None
+        first_error_logged = False
+        error_count = getattr(self, '_error_count', 0)
+        
+        for attempt in range(self.max_retries):
+            # Проверяем, был ли недавно 503 от других запросов
+            await self._check_and_wait_for_503()
+            
+            # Задержка перед попыткой (кроме первой)
+            if attempt > 0:
+                # Если предыдущая ошибка была 503 - ждём 60 сек, иначе обычная задержка
+                if '503' in str(last_error) if last_error else False:
+                    delay = 60
+                    if not first_error_logged:
+                        print(f"   ⚠️  Сервер перегружен (503) для запроса '{query[:50]}...'. Ожидание {delay} сек...")
+                        first_error_logged = True
+                else:
+                    delay = self.retry_delay
+                await asyncio.sleep(delay)
+            
+            try:
+                # Используем переиспользуемую сессию (connection pooling + keep-alive)
+                async with self._session.get(
+                    url,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=self.timeout)
+                ) as response:
+                    # Проверяем HTTP статус код
+                    if response.status != 200:
+                        error_text = await response.text()
+                        # Пытаемся извлечь информацию об ошибке из HTML
+                        if response.status == 503:
+                            # Отмечаем глобально что сервер перегружен
+                            await self._mark_503_error()
+                            
+                            if '<html' in error_text.lower() or '<title>' in error_text.lower():
+                                title_match = re.search(r'<title>([^<]+)</title>', error_text, re.IGNORECASE)
+                                title = title_match.group(1) if title_match else "Service Temporarily Unavailable"
+                                last_error = f"HTTP {response.status} {title} (сервер временно недоступен)"
+                                continue  # Повторим попытку с задержкой 60 сек
+                            else:
+                                last_error = f"HTTP {response.status}: {error_text[:200]}"
+                                continue  # Повторим попытку с задержкой 60 сек
+                        last_error = f"HTTP {response.status}: {error_text[:200]}"
+                        raise Exception(last_error)
+                    
+                    xml_text = await response.text()
+                    
+                    # Проверяем что ответ не HTML (может быть ошибка сервера)
+                    if xml_text.strip().lower().startswith('<html'):
+                        title_match = re.search(r'<title>([^<]+)</title>', xml_text, re.IGNORECASE)
+                        title = title_match.group(1) if title_match else "Server Error"
+                        h1_match = re.search(r'<h1[^>]*>([^<]+)</h1>', xml_text, re.IGNORECASE)
+                        h1 = h1_match.group(1) if h1_match else ""
+                        error_msg = f"{title}" + (f": {h1}" if h1 else "")
+                        last_error = f"Сервер вернул HTML вместо XML: {error_msg}"
+                        
+                        # Если это 503 ошибка - продолжаем с задержкой 60 сек
+                        if '503' in error_msg or 'Service Temporarily Unavailable' in error_msg:
+                            await self._mark_503_error()
+                            last_error = f"HTTP 503 {error_msg}"
+                            continue  # Повторим попытку с задержкой 60 сек
+                        
+                        raise Exception(last_error)
+                    
+                    # Проверяем на ошибки xmlstock
+                    if '<error' in xml_text:
+                        # Ошибка 210 = очередь, ошибка 202 = запрос не обработан
+                        if 'code="210"' in xml_text or 'поставлен в очередь' in xml_text:
+                            # Увеличиваем задержку при очереди
+                            if not first_error_logged and error_count < 3:
+                                print(f"⏳ QUEUE 210 [{query[:30]}...]: waiting 20s...")
+                                first_error_logged = True
+                            await asyncio.sleep(20)
+                        elif 'code="202"' in xml_text or 'не обработан' in xml_text:
+                            # Запрос принят, но еще обрабатывается - короткая задержка
+                            await asyncio.sleep(5)
+                        raise Exception(f"xmlstock API error: {xml_text[:200]}")
+                    
+                    # Обогащаем данные
+                    enriched = self.enricher.enrich_from_serp(xml_text, query)
+                    
+                    if enriched.get('error'):
+                        raise Exception(enriched['error'])
+                    
+                    # Извлекаем LSI
+                    lsi_phrases = self.lsi_extractor.extract_from_serp_documents(
+                        enriched['documents'],
+                        query
+                    )
+                    
+                    return {
+                        'query': query,
+                        'lr': self.lr,
+                        'xml_response': xml_text,
+                        'metrics': enriched['metrics'],
+                        'documents': enriched['documents'],
+                        'lsi_phrases': lsi_phrases,
+                        'error': None
+                    }
+            
+            except asyncio.TimeoutError:
+                last_error = f"Timeout after {self.timeout}s"
+                if not first_error_logged and error_count < 10:
+                    print(f"⚠️ SERP ERROR [{query[:50]}...]: {last_error}")
+                    first_error_logged = True
+                    self._error_count = error_count + 1
+            except aiohttp.ClientError as e:
+                last_error = f"Network error: {e}"
+                if not first_error_logged and error_count < 10:
+                    print(f"⚠️ SERP ERROR [{query[:50]}...]: {last_error}")
+                    first_error_logged = True
+                    self._error_count = error_count + 1
+            except Exception as e:
+                last_error = str(e)
+                if not first_error_logged and error_count < 10:
+                    print(f"⚠️ SERP ERROR [{query[:50]}...]: {last_error}")
+                    if error_count < 3:  # Детали только для первых 3 ошибок
+                        print(f"   API URL: {url}")
+                        print(f"   API Key format: {'user:key' if ':' in self.api_key else 'INVALID FORMAT'}")
+                    first_error_logged = True
+                    self._error_count = error_count + 1
+            
+            # Ждем перед retry
+            if attempt < self.max_retries - 1:
+                await asyncio.sleep(self.retry_delay)
+        
+        # Все попытки неудачны
+        return {
+            'query': query,
+            'lr': self.lr,
+            'xml_response': None,
+            'error': f"Failed after {self.max_retries} attempts: {last_error}",
+            'metrics': self.enricher._get_empty_metrics(),
+            'documents': [],
+            'lsi_phrases': []
+        }
+

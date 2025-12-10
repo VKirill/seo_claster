@@ -1,0 +1,65 @@
+{
+  "main_cluster": "СКУД",
+  "total_queries": 3,
+  "total_frequency": 1800,
+  "subclusters": [
+    {
+      "name": "Покупка СКУД",
+      "target_url": "/catalog/skud",
+      "total_frequency": 1500,
+      "avg_frequency": 750,
+      "total_frequency_exact": 1200,
+      "avg_frequency_exact": 600,
+      "funnel_stage": "consideration",
+      "main_intent": "commercial",
+      "cluster_id": 1,
+      "keywords_count": 2,
+      "keywords": [
+        {
+          "keyword": "купить скуд",
+          "frequency_world": 1000,
+          "frequency_exact": 800,
+          "main_intent": "commercial",
+          "funnel_stage": "decision",
+          "semantic_cluster_id": 1,
+          "cluster_name": "Покупка СКУД",
+          "suggested_url": "/catalog/skud"
+        },
+        {
+          "keyword": "система контроля доступа",
+          "frequency_world": 500,
+          "frequency_exact": 400,
+          "main_intent": "commercial",
+          "funnel_stage": "consideration",
+          "semantic_cluster_id": 1,
+          "cluster_name": "Покупка СКУД",
+          "suggested_url": "/catalog/skud"
+        }
+      ]
+    },
+    {
+      "name": "Установка СКУД",
+      "target_url": "/services/installation",
+      "total_frequency": 300,
+      "avg_frequency": 300,
+      "total_frequency_exact": 250,
+      "avg_frequency_exact": 250,
+      "funnel_stage": "awareness",
+      "main_intent": "informational",
+      "cluster_id": 2,
+      "keywords_count": 1,
+      "keywords": [
+        {
+          "keyword": "установка скуд",
+          "frequency_world": 300,
+          "frequency_exact": 250,
+          "main_intent": "informational",
+          "funnel_stage": "awareness",
+          "semantic_cluster_id": 2,
+          "cluster_name": "Установка СКУД",
+          "suggested_url": "/services/installation"
+        }
+      ]
+    }
+  ]
+}

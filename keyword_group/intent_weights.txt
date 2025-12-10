@@ -1,0 +1,12 @@
+# Веса для расчёта интентов
+# Формат: intent_type:weight
+# Каждый тип интента получает вес, который умножается на количество найденных слов
+# Слова для каждого типа берутся из соответствующих файлов:
+# - commercial: commercial.txt
+# - informational: info.txt  
+# - navigational: пока хардкод в коде (TODO: создать navigation.txt)
+
+commercial:3.0
+informational:4.0
+navigational:4.0
+

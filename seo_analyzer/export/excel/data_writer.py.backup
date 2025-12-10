@@ -1,0 +1,811 @@
+"""Запись данных в Excel листы"""
+
+from typing import List
+import pandas as pd
+
+from .sheet_formatter import set_column_widths, add_conditional_formatting, add_cluster_grouping, apply_number_formats
+
+
+def get_column_translation(col_name: str) -> str:
+    """
+    Получить русское название для колонки
+    
+    Args:
+        col_name: Английское название колонки
+        
+    Returns:
+        Русское название колонки
+    """
+    translations = {
+        # Основная информация
+        'keyword': 'Запрос',
+        'lemmatized': 'Лемматизированный',
+        'cluster_name': 'Название кластера',
+        'semantic_cluster_id': 'ID',
+        'cluster_lsi_phrases': 'LSI фразы кластера',
+        
+        # Частотность и потенциал
+        'frequency_world': 'Частота (мир)',
+        'frequency_exact': 'Частота (точная)',
+        'ctr_potential': 'Потенциал CTR',
+        
+        # Классификация
+        'main_intent': 'Основной интент',
+        'funnel_stage': 'Этап воронки',
+        'target_page_type': 'Тип целевой страницы',
+        
+        # География
+        'geo_type': 'Тип локации',
+        'geo_city': 'Город',
+        'geo_country': 'Страна',
+        'geo_street': 'Улица',
+        'geo_house': 'Дом',
+        'geo_full_address': 'Полный адрес',
+        
+        # Yandex Direct данные
+        'direct_shows': 'Direct: Показы',
+        'direct_clicks': 'Direct: Клики',
+        'direct_ctr': 'Direct: CTR (%)',
+        'premium_ctr': 'Direct: Premium CTR (%)',
+        'first_place_clicks': 'Direct: Клики на 1-й позиции',
+        'first_place_ctr': 'Direct: CTR 1-й позиции (%)',
+        'premium_clicks': 'Direct: Premium клики',
+        'direct_avg_cpc': 'Direct: CPC средний (₽)',
+        'direct_min_cpc': 'Direct: CPC мин (₽)',
+        'direct_max_cpc': 'Direct: CPC макс (₽)',
+        'direct_recommended_cpc': 'Direct: Рекомендуемая ставка (₽)',
+        'direct_competition': 'Direct: Конкуренция',
+        'direct_first_place_bid': 'Direct: Ставка за 1 место (₽)',
+        'direct_first_place_price': 'Direct: Цена 1-й позиции (₽)',
+        'competition_level': 'Direct: Уровень конкуренции',
+        'direct_monthly_budget': 'Direct: Месячный бюджет (₽)',
+        
+        # Приоритет и KEI метрики
+        'priority_score': 'Приоритет',
+        'kei_devaka': 'KEI Девака',
+        'kei_effectiveness': 'KEI Эффективность',
+        'kei_competition': 'KEI Конкуренция',
+        'kei_base_exact_ratio': 'KEI Соотношение',
+        'kei_coefficient': 'KEI Коэффициент',
+        'kei_popularity': 'KEI Популярность',
+        'kei_synergy': 'KEI Синергия',
+        'kei_effectiveness_coefficient': 'KEI Коэффициент эффективности',
+        
+        # Коммерческая ценность и SERP метрики
+        'commercial_value': 'Коммерческая ценность',
+        'serp_docs_count': 'Кол-во документов SERP',
+        'serp_titles_count': 'Кол-во заголовков',
+        'serp_commercial_domains': 'Коммерческих доменов в SERP',
+        'serp_main_pages_count': 'Кол-во главных',
+        'serp_internal_pages_count': 'Кол-во внутренних',
+        
+        # Остальные KEI метрики (НЕ выводятся, но оставлены для совместимости)
+        'kei_standard': 'KEI Стандартный',
+        'kei_potential_traffic': 'KEI Потенциал трафика',
+        'kei_cost_per_visit': 'KEI Цена визита',
+        'kei_yandex_relevance': 'KEI Релевантность',
+        'kei_direct_traffic_potential': 'KEI Direct: Потенциал трафика',
+        'kei_direct_budget_required': 'KEI Direct: Бюджет на 100 кликов (₽)',
+        
+        # Остальные колонки (НЕ выводятся, но оставлены для совместимости)
+        'difficulty_score': 'Сложность',
+        'serp_main_pages': 'Основные страницы SERP',
+        'serp_urls': 'URL из SERP',
+        'cluster_common_urls': 'Общие URL кластера',
+        'serp_info_domains': 'SERP: Инфо-домены',
+        'commercial_score': 'Коммерческий скор',
+        'is_commercial': 'Коммерческий',
+        'is_wholesale': 'Оптовый',
+        'is_urgent': 'Срочный',
+        'query_pattern': 'Паттерн запроса',
+        'words_count': 'Количество слов',
+        'suggested_url': 'Рекомендуемый URL',
+    }
+    return translations.get(col_name, col_name)
+
+
+def select_columns_for_export(df: pd.DataFrame) -> List[str]:
+    """
+    Выбрать колонки для экспорта
+    
+    Args:
+        df: DataFrame с данными
+        
+    Returns:
+        Список названий колонок для экспорта
+    """
+    # Проверяем наличие данных Direct
+    has_direct_data = 'direct_shows' in df.columns and (df['direct_shows'] > 0).any()
+    
+    # Проверяем наличие частотности (Wordstat)
+    has_frequency_data = 'frequency_exact' in df.columns and (df['frequency_exact'] > 0).any()
+    
+    # Порядок колонок согласно требованиям
+    base_columns = [
+        # Блок 1: Основная информация о кластере и запросе
+        'cluster_name',              # Название кластера
+        'semantic_cluster_id',       # ID кластера
+        'keyword',                   # Запрос
+        'lemmatized',                # lemmatized
+        'cluster_lsi_phrases',       # LSI фразы кластера
+        
+        # Блок 2: Частотность и потенциал
+        'frequency_world',           # Частота (мир)
+        'frequency_exact',           # Частота (точная)
+        'ctr_potential',             # Потенциал CTR
+        
+        # Блок 3: Классификация
+        'main_intent',               # Основной интент
+        'funnel_stage',              # funnel_stage
+        'target_page_type',          # target_page_type
+        
+        # Блок 4: География
+        'geo_type',                  # Тип локации
+        'geo_city',                  # Город
+        'geo_country',               # geo_country
+        'geo_full_address',          # Полный адрес (для адресных запросов)
+    ]
+    
+    # Фильтруем только существующие базовые колонки
+    priority_columns = [col for col in base_columns if col in df.columns]
+    
+    # Блок 5: Yandex Direct колонки - только если есть данные Direct И частотность
+    if has_direct_data and has_frequency_data:
+        direct_columns = [
+            'direct_shows',
+            'direct_clicks',
+            'direct_ctr',
+            'premium_ctr',
+            'first_place_clicks',
+            'first_place_ctr',
+            'premium_clicks',
+            'direct_avg_cpc',
+            'direct_min_cpc',
+            'direct_max_cpc',
+            'direct_recommended_cpc',
+            'competition_level',
+            'direct_first_place_bid',
+            'direct_first_place_price',
+            'direct_monthly_budget',
+        ]
+        # Добавляем только существующие Direct колонки
+        priority_columns.extend([col for col in direct_columns if col in df.columns])
+    
+    # Блок 6: Приоритет и KEI метрики
+    kei_and_priority_columns = [
+        'priority_score',            # Приоритет
+        'kei_devaka',                # KEI Девака
+        'kei_effectiveness',         # KEI Эффективность
+        'kei_competition',           # KEI Конкуренция
+        'kei_base_exact_ratio',      # KEI Соотношение
+        'kei_coefficient',           # KEI Коэффициент
+        'kei_popularity',            # KEI Популярность
+        'kei_synergy',               # KEI Синергия
+        'kei_effectiveness_coefficient',  # KEI Коэффициент эффективности
+    ]
+    priority_columns.extend([col for col in kei_and_priority_columns if col in df.columns])
+    
+    # Блок 7: Коммерческая ценность и SERP метрики
+    value_and_serp_columns = [
+        'commercial_value',          # Коммерческая ценность
+        'serp_docs_count',           # Кол-во документов SERP
+        'serp_titles_count',         # Кол-во заголовков
+        'serp_main_pages_count',     # Кол-во главных
+        'serp_internal_pages_count', # Кол-во внутренних
+        # 'serp_commercial_domains', # СКРЫТО: не выводится в Excel
+    ]
+    priority_columns.extend([col for col in value_and_serp_columns if col in df.columns])
+    
+    # ИСКЛЮЧАЕМ из экспорта (но не удаляем из кода):
+    # - Все остальные KEI метрики не из списка
+    # - kei_standard, kei_yandex_relevance, kei_potential_traffic, kei_cost_per_visit
+    # - kei_standard_normalized (уже удалено ранее)
+    # - difficulty_score, words_count, suggested_url
+    # - serp_main_pages, serp_info_domains, serp_commercial_domains
+    # - commercial_score, is_commercial, is_wholesale, is_urgent, query_pattern
+    
+    return priority_columns
+
+
+def create_all_queries_sheet(
+    df: pd.DataFrame,
+    writer: pd.ExcelWriter,
+    formats: dict,
+    group_by_clusters: bool
+):
+    """
+    Создать лист со всеми запросами
+    
+    Args:
+        df: DataFrame с данными
+        writer: ExcelWriter объект
+        formats: Словарь с форматами
+        group_by_clusters: Группировать по кластерам
+    """
+    sheet_name = 'Все запросы'
+    
+    # Сортируем
+    if group_by_clusters and 'semantic_cluster_id' in df.columns:
+        df_sorted = df.sort_values(['semantic_cluster_id', 'frequency_world'], ascending=[True, False])
+    else:
+        df_sorted = df.sort_values('frequency_world', ascending=False)
+    
+    # Выбираем колонки для экспорта
+    columns_to_export = select_columns_for_export(df_sorted)
+    df_export = df_sorted[columns_to_export].copy()
+    
+    # Конвертируем списки в строки для Excel (только для LSI фраз)
+    if 'lsi_phrases' in df_export.columns:
+        def convert_query_lsi_phrases(x):
+            """Конвертировать LSI фразы запроса в строку для Excel"""
+            # Безопасная проверка на None и NaN (избегаем ошибки с массивами)
+            if x is None:
+                return ''
+            
+            # Проверяем тип перед использованием pd.isna()
+            # pd.isna() на массивах/Series возвращает массив, что вызывает ошибку в условии if
+            import numpy as np
+            
+            # Если это список, кортеж или numpy массив - обрабатываем как список
+            if isinstance(x, (list, tuple, np.ndarray)):
+                # Это массив или список - обрабатываем дальше
+                pass
+            elif hasattr(x, '__iter__') and not isinstance(x, str):
+                # Другие итерируемые объекты (например, pandas Series) - преобразуем в список
+                try:
+                    x = list(x) if hasattr(x, '__iter__') else x
+                except:
+                    # Если не удалось преобразовать - пропускаем проверку на NaN
+                    # чтобы избежать ошибки с массивами
+                    pass
+            elif isinstance(x, str):
+                # Строка - обрабатываем дальше
+                pass
+            else:
+                # Скалярное значение - безопасно проверяем на NaN
+                # Используем более простую проверку только для известных числовых типов
+                try:
+                    # Проверяем только для обычных чисел Python (int, float)
+                    # Не используем pd.isna() или np.isnan() для избежания проблем с массивами
+                    if isinstance(x, (int, float)):
+                        # Для обычных чисел Python проверяем на NaN через сравнение
+                        if isinstance(x, float) and (x != x):  # NaN != NaN всегда True
+                            return ''
+                except:
+                    # Если возникла ошибка - пропускаем проверку на NaN
+                    # и продолжаем обработку как обычное значение
+                    pass
+                # Для других типов (включая Series, массивы, строки, numpy типы) пропускаем проверку на NaN
+            
+            if isinstance(x, list):
+                if len(x) == 0:
+                    return ''
+                phrases = []
+                for item in x[:20]:  # Топ-20 фраз
+                    if isinstance(item, dict):
+                        phrase = item.get('phrase', '')
+                        if phrase:
+                            phrases.append(phrase)
+                    elif isinstance(item, str):
+                        if item.strip():
+                            phrases.append(item.strip())
+                return ', '.join(phrases) if phrases else ''
+            elif isinstance(x, str):
+                # Если это строка, пытаемся распарсить JSON
+                if x.strip() == '' or x.strip() == '[]':
+                    return ''
+                try:
+                    import json
+                    parsed = json.loads(x)
+                    if isinstance(parsed, list):
+                        phrases = []
+                        for item in parsed[:20]:
+                            if isinstance(item, dict):
+                                phrase = item.get('phrase', '')
+                                if phrase:
+                                    phrases.append(phrase)
+                            elif isinstance(item, str):
+                                if item.strip():
+                                    phrases.append(item.strip())
+                        return ', '.join(phrases) if phrases else ''
+                except:
+                    return x
+            return ''
+        
+        df_export['lsi_phrases'] = df_export['lsi_phrases'].apply(convert_query_lsi_phrases)
+    
+    # Конвертируем cluster_lsi_phrases если есть (список словарей -> строка)
+    if 'cluster_lsi_phrases' in df_export.columns:
+        def convert_lsi_phrases(x):
+            """Конвертировать LSI фразы в строку для Excel"""
+            # Обрабатываем разные типы данных
+            # Безопасная проверка на None и NaN (избегаем ошибки с массивами)
+            if x is None:
+                return ''
+            
+            # Проверяем тип перед использованием pd.isna()
+            # pd.isna() на массивах/Series возвращает массив, что вызывает ошибку в условии if
+            import numpy as np
+            
+            # Если это список, кортеж или numpy массив - обрабатываем как список
+            if isinstance(x, (list, tuple, np.ndarray)):
+                # Это массив или список - обрабатываем дальше
+                pass
+            elif hasattr(x, '__iter__') and not isinstance(x, str):
+                # Другие итерируемые объекты (например, pandas Series) - преобразуем в список
+                try:
+                    x = list(x) if hasattr(x, '__iter__') else x
+                except:
+                    # Если не удалось преобразовать - пропускаем проверку на NaN
+                    # чтобы избежать ошибки с массивами
+                    pass
+            elif isinstance(x, str):
+                # Строка - обрабатываем дальше
+                pass
+            else:
+                # Скалярное значение - безопасно проверяем на NaN
+                # Используем более простую проверку только для известных числовых типов
+                try:
+                    # Проверяем только для обычных чисел Python (int, float)
+                    # Не используем pd.isna() или np.isnan() для избежания проблем с массивами
+                    if isinstance(x, (int, float)):
+                        # Для обычных чисел Python проверяем на NaN через сравнение
+                        if isinstance(x, float) and (x != x):  # NaN != NaN всегда True
+                            return ''
+                except:
+                    # Если возникла ошибка - пропускаем проверку на NaN
+                    # и продолжаем обработку как обычное значение
+                    pass
+                # Для других типов (включая Series, массивы, строки, numpy типы) пропускаем проверку на NaN
+            
+            if isinstance(x, list):
+                if len(x) == 0:
+                    return ''
+                # Извлекаем фразы из словарей
+                phrases = []
+                for item in x[:20]:  # Топ-20 фраз
+                    if isinstance(item, dict):
+                        phrase = item.get('phrase', '')
+                        if phrase:
+                            phrases.append(phrase)
+                    elif isinstance(item, str):
+                        if item.strip():
+                            phrases.append(item.strip())
+                return ', '.join(phrases) if phrases else ''
+            elif isinstance(x, str):
+                # Если это строка, пытаемся распарсить JSON
+                if x.strip() == '' or x.strip() == '[]':
+                    return ''
+                # Если это уже готовая строка с фразами - возвращаем как есть
+                if ',' in x or len(x) > 50:
+                    return x
+                # Иначе пытаемся распарсить как JSON
+                try:
+                    import json
+                    parsed = json.loads(x)
+                    if isinstance(parsed, list):
+                        phrases = []
+                        for item in parsed[:20]:
+                            if isinstance(item, dict):
+                                phrase = item.get('phrase', '')
+                                if phrase:
+                                    phrases.append(phrase)
+                            elif isinstance(item, str):
+                                if item.strip():
+                                    phrases.append(item.strip())
+                        return ', '.join(phrases) if phrases else ''
+                except (json.JSONDecodeError, TypeError):
+                    # Не JSON - возвращаем как есть
+                    return x
+            else:
+                # Другие типы - пустая строка
+                return ''
+        
+        df_export['cluster_lsi_phrases'] = df_export['cluster_lsi_phrases'].apply(convert_lsi_phrases)
+    
+    # Записываем в Excel
+    df_export.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1, header=False)
+    
+    worksheet = writer.sheets[sheet_name]
+    
+    # Записываем заголовки с переводом на русский
+    for col_num, col_name in enumerate(df_export.columns):
+        russian_name = get_column_translation(col_name)
+        worksheet.write(0, col_num, russian_name, formats['header'])
+    
+    # Настройки листа
+    worksheet.freeze_panes(1, 0)  # Заморозить первую строку
+    
+    # Автофильтр
+    worksheet.autofilter(0, 0, len(df_export), len(df_export.columns) - 1)
+    
+    # Настройка ширины колонок
+    set_column_widths(worksheet, df_export.columns)
+    
+    # Применяем форматирование чисел
+    apply_number_formats(worksheet, df_export, formats)
+    
+    # Условное форматирование
+    add_conditional_formatting(worksheet, df_export, sheet_name)
+    
+    # ОТКЛЮЧЕНО: Группировка по кластерам (разворачивающиеся списки)
+    # if group_by_clusters and 'semantic_cluster_id' in df_export.columns:
+    #     add_cluster_grouping(worksheet, df_sorted, 'semantic_cluster_id')
+
+
+def create_top_priority_sheet(df: pd.DataFrame, writer: pd.ExcelWriter, formats: dict):
+    """
+    Создать лист с топ приоритетными запросами
+    
+    Args:
+        df: DataFrame с данными
+        writer: ExcelWriter объект
+        formats: Словарь с форматами
+    """
+    sheet_name = 'Топ приоритетных'
+    
+    # Берем топ 100
+    df_top = df.nlargest(100, 'priority_score')
+    
+    # Основные колонки для топ-запросов
+    columns = [
+        'keyword', 'frequency_world', 'priority_score',
+        'kei_effectiveness', 'main_intent'
+    ]
+    
+    # Фильтруем только существующие колонки
+    columns = [col for col in columns if col in df_top.columns]
+    df_export = df_top[columns].copy()
+    
+    # Записываем данные без заголовков
+    df_export.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1, header=False)
+    
+    worksheet = writer.sheets[sheet_name]
+    
+    # Записываем русские заголовки
+    for col_num, col_name in enumerate(columns):
+        russian_name = get_column_translation(col_name)
+        worksheet.write(0, col_num, russian_name, formats['header'])
+    
+    worksheet.freeze_panes(1, 0)
+    worksheet.autofilter(0, 0, len(df_export), len(df_export.columns) - 1)
+    
+    set_column_widths(worksheet, df_export.columns)
+    
+    # Применяем форматирование чисел
+    apply_number_formats(worksheet, df_export, formats)
+
+
+def create_clusters_summary_sheet(df: pd.DataFrame, writer: pd.ExcelWriter, formats: dict):
+    """
+    Создать сводку по кластерам
+    
+    Args:
+        df: DataFrame с данными
+        writer: ExcelWriter объект
+        formats: Словарь с форматами
+    """
+    sheet_name = 'Сводка по кластерам'
+    
+    # Проверяем наличие колонки semantic_cluster_id
+    if 'semantic_cluster_id' not in df.columns:
+        print("ℹ️  Пропускаем лист 'Сводка по кластерам' - нет кластеризации")
+        return
+    
+    # Агрегация по кластерам
+    cluster_summary = df.groupby('semantic_cluster_id').agg({
+        'keyword': 'count',
+        'frequency_world': 'sum',
+        'main_intent': lambda x: x.mode()[0] if len(x) > 0 else 'unknown',
+    }).reset_index()
+    
+    cluster_summary.columns = [
+        'ID кластера',
+        'Количество запросов',
+        'Общая частота',
+        'Основной интент'
+    ]
+    
+    # Добавляем названия кластеров (главный запрос)
+    main_queries = df.loc[df.groupby('semantic_cluster_id')['frequency_world'].idxmax()]
+    cluster_summary['Главный запрос'] = cluster_summary['ID кластера'].map(
+        main_queries.set_index('semantic_cluster_id')['keyword']
+    )
+    
+    # Сортируем по частоте
+    cluster_summary = cluster_summary.sort_values('Общая частота', ascending=False)
+    
+    cluster_summary.to_excel(writer, sheet_name=sheet_name, index=False)
+    
+    worksheet = writer.sheets[sheet_name]
+    worksheet.freeze_panes(1, 0)
+    worksheet.autofilter(0, 0, len(cluster_summary), len(cluster_summary.columns) - 1)
+    
+    set_column_widths(worksheet, cluster_summary.columns)
+    
+    # Применяем форматирование чисел
+    apply_number_formats(worksheet, cluster_summary, formats)
+
+
+def create_intent_summary_sheet(df: pd.DataFrame, writer: pd.ExcelWriter, formats: dict):
+    """
+    Создать сводку по интентам
+    
+    Args:
+        df: DataFrame с данными
+        writer: ExcelWriter объект
+        formats: Словарь с форматами
+    """
+    sheet_name = 'Сводка по интентам'
+    
+    # Базовая агрегация
+    intent_summary = df.groupby('main_intent').agg({
+        'keyword': 'count',
+        'frequency_world': 'sum'
+    }).reset_index()
+    
+    intent_summary.columns = [
+        'Интент',
+        'Количество запросов',
+        'Общая частота'
+    ]
+    
+    intent_summary = intent_summary.sort_values('Общая частота', ascending=False)
+    
+    intent_summary.to_excel(writer, sheet_name=sheet_name, index=False)
+    
+    worksheet = writer.sheets[sheet_name]
+    worksheet.freeze_panes(1, 0)
+    
+    set_column_widths(worksheet, intent_summary.columns)
+    
+    # Применяем форматирование чисел
+    apply_number_formats(worksheet, intent_summary, formats)
+
+
+def create_lsi_sheet(df: pd.DataFrame, writer: pd.ExcelWriter, formats: dict):
+    """
+    Создать лист с LSI фразами
+    
+    Args:
+        df: DataFrame с данными
+        writer: ExcelWriter объект
+        formats: Словарь с форматами
+    """
+    sheet_name = 'LSI фразы'
+    
+    # Если есть полная информация о LSI
+    if 'cluster_lsi_full' in df.columns:
+        lsi_rows = []
+        
+        for _, row in df.iterrows():
+            cluster_id = row.get('semantic_cluster_id', -1)
+            lsi_list = row.get('cluster_lsi_full', [])
+            
+            if isinstance(lsi_list, list):
+                for lsi_item in lsi_list[:30]:  # Топ 30 на кластер
+                    if isinstance(lsi_item, dict):
+                        lsi_rows.append({
+                            'ID кластера': cluster_id,
+                            'LSI фраза': lsi_item.get('phrase', ''),
+                            'Частота': lsi_item.get('frequency', 0),
+                            'Количество запросов': lsi_item.get('queries_count', 0),
+                            'Основной источник': lsi_item.get('main_source', '')
+                        })
+        
+        if lsi_rows:
+            lsi_df = pd.DataFrame(lsi_rows)
+            lsi_df = lsi_df.drop_duplicates(subset=['ID кластера', 'LSI фраза'])
+            lsi_df = lsi_df.sort_values(['ID кластера', 'Частота'], ascending=[True, False])
+            
+            lsi_df.to_excel(writer, sheet_name=sheet_name, index=False)
+            
+            worksheet = writer.sheets[sheet_name]
+            worksheet.freeze_panes(1, 0)
+            worksheet.autofilter(0, 0, len(lsi_df), len(lsi_df.columns) - 1)
+            
+            set_column_widths(worksheet, lsi_df.columns)
+            
+            # Применяем форматирование чисел
+            apply_number_formats(worksheet, lsi_df, formats)
+    else:
+        # Простой вариант - просто текст (используем строковую версию)
+        col_to_use = 'cluster_lsi_phrases_str' if 'cluster_lsi_phrases_str' in df.columns else 'cluster_lsi_phrases'
+        lsi_simple = df[['semantic_cluster_id', col_to_use]].drop_duplicates()
+        lsi_simple.columns = ['ID кластера', 'LSI фразы']
+        
+        # Конвертируем список словарей в строку если нужно
+        if col_to_use == 'cluster_lsi_phrases':
+            lsi_simple['LSI фразы'] = lsi_simple['LSI фразы'].apply(
+                lambda x: ', '.join([item.get('phrase', '') for item in x]) if isinstance(x, list) and x else str(x) if x else ''
+            )
+        
+        lsi_simple.to_excel(writer, sheet_name=sheet_name, index=False)
+        
+        worksheet = writer.sheets[sheet_name]
+        worksheet.freeze_panes(1, 0)
+        set_column_widths(worksheet, lsi_simple.columns)
+        
+        # Применяем форматирование чисел
+        apply_number_formats(worksheet, lsi_simple, formats)
+
+
+def create_intent_filtered_sheet(
+    df: pd.DataFrame,
+    writer: pd.ExcelWriter,
+    formats: dict,
+    intent_type: str,
+    group_by_clusters: bool = True
+):
+    """
+    Создать лист с запросами отфильтрованными по интенту
+    
+    Фильтрует кластеры где ВСЕ запросы имеют указанный интент
+    
+    Args:
+        df: DataFrame с данными
+        writer: ExcelWriter объект
+        formats: Словарь с форматами
+        intent_type: Тип интента ('commercial' или 'informational')
+        group_by_clusters: Группировать по кластерам
+    """
+    # Названия листов
+    sheet_names = {
+        'commercial': 'Коммерческие кластеры',
+        'informational': 'Информационные кластеры'
+    }
+    
+    sheet_name = sheet_names.get(intent_type, f'{intent_type.capitalize()} кластеры')
+    
+    # Проверяем наличие нужных колонок
+    if 'semantic_cluster_id' not in df.columns or 'main_intent' not in df.columns:
+        print(f"ℹ️  Пропускаем лист '{sheet_name}' - нет колонок semantic_cluster_id или main_intent")
+        return
+    
+    # Фильтруем полностью чистые кластеры по интенту
+    pure_intent_cluster_ids = []
+    for cluster_id, cluster_df in df.groupby('semantic_cluster_id'):
+        # Все запросы кластера должны иметь одинаковый интент
+        intents = cluster_df['main_intent'].unique()
+        if len(intents) == 1 and intents[0] == intent_type:
+            pure_intent_cluster_ids.append(cluster_id)
+    
+    if not pure_intent_cluster_ids:
+        print(f"ℹ️  Пропускаем лист '{sheet_name}' - нет полностью {intent_type} кластеров")
+        return
+    
+    # Фильтруем DataFrame
+    df_filtered = df[df['semantic_cluster_id'].isin(pure_intent_cluster_ids)].copy()
+    
+    # Сортируем
+    if group_by_clusters:
+        df_filtered = df_filtered.sort_values(['semantic_cluster_id', 'frequency_world'], ascending=[True, False])
+    else:
+        df_filtered = df_filtered.sort_values('frequency_world', ascending=False)
+    
+    # Выбираем колонки для экспорта
+    columns_to_export = select_columns_for_export(df_filtered)
+    df_export = df_filtered[columns_to_export].copy()
+    
+    # Конвертируем списки в строки для Excel (только для LSI фраз)
+    if 'lsi_phrases' in df_export.columns:
+        df_export['lsi_phrases'] = df_export['lsi_phrases'].apply(
+            lambda x: ', '.join(x[:20]) if isinstance(x, list) and x else ''
+        )
+    
+    # Конвертируем cluster_lsi_phrases если есть
+    if 'cluster_lsi_phrases' in df_export.columns:
+        def convert_lsi_phrases(x):
+            """Конвертировать LSI фразы в строку для Excel"""
+            # Обрабатываем разные типы данных
+            # Безопасная проверка на None и NaN (избегаем ошибки с массивами)
+            if x is None:
+                return ''
+            
+            # Проверяем тип перед использованием pd.isna()
+            # pd.isna() на массивах/Series возвращает массив, что вызывает ошибку в условии if
+            import numpy as np
+            
+            # Если это список, кортеж или numpy массив - обрабатываем как список
+            if isinstance(x, (list, tuple, np.ndarray)):
+                # Это массив или список - обрабатываем дальше
+                pass
+            elif hasattr(x, '__iter__') and not isinstance(x, str):
+                # Другие итерируемые объекты (например, pandas Series) - преобразуем в список
+                try:
+                    x = list(x) if hasattr(x, '__iter__') else x
+                except:
+                    # Если не удалось преобразовать - пропускаем проверку на NaN
+                    # чтобы избежать ошибки с массивами
+                    pass
+            elif isinstance(x, str):
+                # Строка - обрабатываем дальше
+                pass
+            else:
+                # Скалярное значение - безопасно проверяем на NaN
+                # Используем более простую проверку только для известных числовых типов
+                try:
+                    # Проверяем только для обычных чисел Python (int, float)
+                    # Не используем pd.isna() или np.isnan() для избежания проблем с массивами
+                    if isinstance(x, (int, float)):
+                        # Для обычных чисел Python проверяем на NaN через сравнение
+                        if isinstance(x, float) and (x != x):  # NaN != NaN всегда True
+                            return ''
+                except:
+                    # Если возникла ошибка - пропускаем проверку на NaN
+                    # и продолжаем обработку как обычное значение
+                    pass
+                # Для других типов (включая Series, массивы, строки, numpy типы) пропускаем проверку на NaN
+            
+            if isinstance(x, list):
+                if len(x) == 0:
+                    return ''
+                # Извлекаем фразы из словарей
+                phrases = []
+                for item in x[:20]:  # Топ-20 фраз
+                    if isinstance(item, dict):
+                        phrase = item.get('phrase', '')
+                        if phrase:
+                            phrases.append(phrase)
+                    elif isinstance(item, str):
+                        if item.strip():
+                            phrases.append(item.strip())
+                return ', '.join(phrases) if phrases else ''
+            elif isinstance(x, str):
+                # Если это строка, пытаемся распарсить JSON
+                if x.strip() == '' or x.strip() == '[]':
+                    return ''
+                # Если это уже готовая строка с фразами - возвращаем как есть
+                if ',' in x or len(x) > 50:
+                    return x
+                # Иначе пытаемся распарсить как JSON
+                try:
+                    import json
+                    parsed = json.loads(x)
+                    if isinstance(parsed, list):
+                        phrases = []
+                        for item in parsed[:20]:
+                            if isinstance(item, dict):
+                                phrase = item.get('phrase', '')
+                                if phrase:
+                                    phrases.append(phrase)
+                            elif isinstance(item, str):
+                                if item.strip():
+                                    phrases.append(item.strip())
+                        return ', '.join(phrases) if phrases else ''
+                except (json.JSONDecodeError, TypeError):
+                    # Не JSON - возвращаем как есть
+                    return x
+            else:
+                # Другие типы - пустая строка
+                return ''
+        
+        df_export['cluster_lsi_phrases'] = df_export['cluster_lsi_phrases'].apply(convert_lsi_phrases)
+    
+    # Записываем в Excel
+    df_export.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1, header=False)
+    
+    worksheet = writer.sheets[sheet_name]
+    
+    # Записываем заголовки с переводом на русский
+    for col_num, col_name in enumerate(df_export.columns):
+        russian_name = get_column_translation(col_name)
+        worksheet.write(0, col_num, russian_name, formats['header'])
+    
+    # Настройки листа
+    worksheet.freeze_panes(1, 0)  # Заморозить первую строку
+    
+    # Автофильтр
+    worksheet.autofilter(0, 0, len(df_export), len(df_export.columns) - 1)
+    
+    # Настройка ширины колонок
+    set_column_widths(worksheet, df_export.columns)
+    
+    # Применяем форматирование чисел
+    apply_number_formats(worksheet, df_export, formats)
+    
+    # Условное форматирование
+    add_conditional_formatting(worksheet, df_export, sheet_name)
+    
+    print(f"  ✓ Создан лист '{sheet_name}': {len(pure_intent_cluster_ids)} кластеров, {len(df_export)} запросов")
+

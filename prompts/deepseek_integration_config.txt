@@ -1,0 +1,109 @@
+=================================================================
+КОНФИГУРАЦИЯ ИНТЕГРАЦИИ С DEEPSEEK API ДЛЯ РАСЧЁТА КОНВЕРСИИ
+=================================================================
+
+## НАЗНАЧЕНИЕ
+Расчёт средней стоимости лида и % конверсии на основе анализа 
+15 высокочастотных запросов через DeepSeek AI.
+
+## ПАРАМЕТРЫ
+
+1. **API Endpoint:** https://api.deepseek.com/v1/chat/completions
+   
+2. **Model:** deepseek-chat
+
+3. **Количество запросов для анализа:** 15 ВЧ запросов
+   - Критерий отбора: топ-15 по "frequency_exact" (точная частота)
+   - Минимальная частота: рекомендуется > 100 показов/месяц
+
+4. **System Prompt:** см. deepseek_lead_cost_analysis.txt
+
+5. **User Message (пример):**
+   ```
+   Список запросов:
+   1. скуд купить - 468 показов
+   2. скуд цена - 180 показов
+   3. система скуд - 1442 показа
+   ... (ещё 12 запросов)
+   ```
+
+6. **Ожидаемый ответ (JSON):**
+   ```json
+   {
+     "lead_cost_rub": 2500,
+     "conversion_rate_percent": 2.5
+   }
+   ```
+
+## ИСПОЛЬЗОВАНИЕ РЕЗУЛЬТАТОВ
+
+После получения ответа от DeepSeek:
+
+1. `lead_cost_rub` → используется для расчёта:
+   - `direct_cost_per_conversion` (стоимость конверсии)
+   - `direct_roi_forecast` (прогноз ROI)
+
+2. `conversion_rate_percent` → используется для расчёта:
+   - `direct_cost_per_conversion` = CPC / (conversion_rate / 100)
+   - `kei_direct_profitability` (прибыльность)
+   - `direct_roi_forecast` (прогноз ROI)
+
+## ИНТЕГРАЦИЯ В КОД
+
+Рекомендуемое место: `seo_analyzer/analysis/deepseek_conversion_estimator.py`
+
+Вызов: перед расчётом Direct метрик в `pipeline/stages/yandex_direct_enricher.py`
+
+## ПРИМЕР ЗАПРОСА (curl)
+
+```bash
+curl https://api.deepseek.com/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+  -d '{
+    "model": "deepseek-chat",
+    "messages": [
+      {
+        "role": "system",
+        "content": "<содержимое deepseek_lead_cost_analysis.txt>"
+      },
+      {
+        "role": "user",
+        "content": "Список запросов:\n1. скуд купить - 468\n2. скуд цена - 180\n..."
+      }
+    ],
+    "temperature": 1.0,
+    "max_tokens": 200
+  }'
+```
+
+## ПАРАМЕТР TEMPERATURE
+
+Используется значение **1.0** (рекомендация DeepSeek для Data Analysis).
+
+Рекомендации по Temperature:
+- Coding / Math: 0.0 (детерминированный результат)
+- Data Analysis: 1.0 (наш кейс - анализ данных)
+- General Conversation: 1.3
+- Translation: 1.3
+- Creative Writing: 1.5
+```
+
+## НАСТРОЙКИ В config_local.py
+
+Добавить:
+```python
+# DeepSeek API для расчёта конверсии
+DEEPSEEK_API_KEY = "your_api_key_here"
+DEEPSEEK_ENABLED = True  # Включить/выключить интеграцию
+DEEPSEEK_TOP_N_QUERIES = 15  # Количество ВЧ запросов для анализа
+```
+
+## FALLBACK (если DeepSeek недоступен)
+
+Использовать дефолтные значения:
+- `conversion_rate`: 2.0% (по умолчанию)
+- `lead_cost_rub`: рассчитывать как avg_check * 0.5
+
+=================================================================
+

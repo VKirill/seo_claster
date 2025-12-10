@@ -1,0 +1,853 @@
+"""
+Async Batch SERP Client
+Массовая отправка запросов в асинхронном режиме xmlstock
+
+Workflow:
+1. Отправляем ВСЕ запросы с delayed=1 → получаем все req_id
+2. Ждём 10-20 секунд
+3. Параллельно запрашиваем результаты по всем req_id
+4. Повторяем для тех что ещё не готовы (код 202)
+"""
+
+import asyncio
+import aiohttp
+from typing import List, Dict, Any, Optional, Callable
+from dataclasses import dataclass
+import re
+from datetime import datetime
+import time
+
+
+@dataclass
+class PendingRequest:
+    """Отложенный запрос"""
+    query: str
+    req_id: str
+    sent_at: datetime
+    attempts: int = 0
+    last_error: Optional[str] = None
+
+
+class AsyncBatchSERPClient:
+    """
+    Массовая отправка и получение SERP данных в асинхронном режиме
+    
+    Преимущества:
+    - Отправка 1000+ запросов за несколько секунд
+    - Параллельное получение результатов
+    - Автоматические повторы для незавершённых (202)
+    - Сохранение req_id в Master DB для восстановления
+    """
+    
+    # Глобальный флаг перегрузки сервера (503)
+    # Если сервер вернул 503, все запросы ждут 60 сек перед следующей попыткой
+    _last_503_time: Optional[float] = None
+    _503_lock: Optional[asyncio.Lock] = None
+    
+    @classmethod
+    def _get_503_lock(cls) -> asyncio.Lock:
+        """Получить или создать Lock для синхронизации"""
+        if cls._503_lock is None:
+            cls._503_lock = asyncio.Lock()
+        return cls._503_lock
+    
+    def __init__(
+        self,
+        api_key: str,
+        lr: int = 213,
+        max_concurrent_send: int = 10,  # Уменьшили до 10 для стабильности (было 50)
+        max_concurrent_fetch: int = 20,  # Получение результатов (было 50)
+        initial_delay: int = 10,  # Первая задержка перед проверкой
+        retry_delay: int = 5,  # Задержка между повторами
+        max_attempts: int = 100,  # Максимум попыток получения (практически без ограничения)
+        requests_per_second: float = 50.0  # Rate limit: снижен до 50 запросов/сек для стабильности
+    ):
+        """
+        Args:
+            api_key: API ключ xmlstock (user:key)
+            lr: Регион
+            max_concurrent_send: Макс параллельных отправок (по умолчанию 10 для стабильности)
+            max_concurrent_fetch: Макс параллельных получений (по умолчанию 20)
+            initial_delay: Задержка перед первой проверкой (сек)
+            retry_delay: Задержка между повторами (сек)
+            max_attempts: Макс попыток получения результата (100 = почти без ограничения)
+            requests_per_second: Максимум запросов в секунду (по умолчанию 50 для стабильности)
+        """
+        self.api_key = api_key
+        self.lr = lr
+        self.max_concurrent_send = max_concurrent_send
+        self.max_concurrent_fetch = max_concurrent_fetch
+        self.initial_delay = initial_delay
+        self.retry_delay = retry_delay
+        self.max_attempts = max_attempts
+        self.requests_per_second = requests_per_second
+        
+        # Rate limiting: минимальная задержка между запросами
+        self.min_request_interval = 1.0 / requests_per_second if requests_per_second > 0 else 0.01
+        self._last_request_time = 0.0
+        self._rate_limit_lock = asyncio.Lock()
+        
+        # Парсинг ключа
+        if ':' in api_key:
+            self.user, self.key = api_key.split(':', 1)
+        else:
+            self.user = api_key
+            self.key = api_key
+        
+        self.url = "https://xmlstock.com/yandex/xml/"
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._session_lock = asyncio.Lock()  # Блокировка для создания/закрытия сессии
+    
+    @classmethod
+    async def _check_and_wait_for_503(cls):
+        """Проверить, был ли недавно 503, и если да - подождать"""
+        async with cls._get_503_lock():
+            if cls._last_503_time is not None:
+                time_since_503 = time.time() - cls._last_503_time
+                if time_since_503 < 60:
+                    wait_time = 60 - time_since_503
+                    print(f"   ⚠️  Сервер был перегружен (503) {time_since_503:.1f} сек назад. Ожидание {wait_time:.1f} сек...")
+                    await asyncio.sleep(wait_time)
+                    cls._last_503_time = None  # Сбрасываем после ожидания
+    
+    @classmethod
+    async def _mark_503_error(cls):
+        """Отметить что сервер вернул 503"""
+        async with cls._get_503_lock():
+            cls._last_503_time = time.time()
+    
+    async def _wait_for_rate_limit(self):
+        """Ожидание для соблюдения rate limit (не более requests_per_second запросов/сек)"""
+        async with self._rate_limit_lock:
+            current_time = time.time()
+            time_since_last = current_time - self._last_request_time
+            
+            if time_since_last < self.min_request_interval:
+                wait_time = self.min_request_interval - time_since_last
+                await asyncio.sleep(wait_time)
+            
+            self._last_request_time = time.time()
+    
+    async def _ensure_session(self):
+        """Создать сессию если нет (thread-safe)"""
+        # Проверяем без блокировки для быстрого пути
+        if self._session is not None and not self._session.closed:
+            return
+        
+        # Используем блокировку для создания/закрытия сессии
+        async with self._session_lock:
+            # Двойная проверка после получения блокировки
+            if self._session is not None and not self._session.closed:
+                return
+            
+            # Закрываем старую сессию если есть (на всякий случай)
+            if self._session is not None:
+                try:
+                    if not self._session.closed:
+                        await self._session.close()
+                    # Закрываем connector если есть
+                    if hasattr(self._session, '_connector') and self._session._connector:
+                        await self._session._connector.close()
+                    # Даём время закрыться
+                    await asyncio.sleep(0.25)
+                except Exception:
+                    # Игнорируем ошибки при закрытии
+                    pass
+                finally:
+                    self._session = None
+            
+            # Создаём новую сессию с правильными настройками
+            # force_close=False для переиспользования соединений (быстрее)
+            # ttl_dns_cache=300 для кэширования DNS на 5 минут
+            # enable_cleanup_closed=True для автоматической очистки закрытых соединений
+            connector = aiohttp.TCPConnector(
+                limit=100, 
+                limit_per_host=50, 
+                force_close=False,
+                ttl_dns_cache=300,
+                enable_cleanup_closed=True
+            )
+            timeout = aiohttp.ClientTimeout(total=30, connect=10)
+            self._session = aiohttp.ClientSession(
+                connector=connector, 
+                timeout=timeout,
+                raise_for_status=False  # Не кидаем исключения на HTTP ошибки
+            )
+    
+    async def close(self):
+        """Закрыть сессию и connector (thread-safe)"""
+        async with self._session_lock:
+            if self._session:
+                try:
+                    # Сначала закрываем connector (освобождает соединения)
+                    if hasattr(self._session, '_connector') and self._session._connector:
+                        if not self._session._connector.closed:
+                            await self._session._connector.close()
+                    
+                    # Затем закрываем саму сессию
+                    if not self._session.closed:
+                        await self._session.close()
+                    
+                    # Даём больше времени для полного закрытия всех соединений
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    # Игнорируем ошибки при закрытии, но логируем для отладки
+                    pass
+                finally:
+                    self._session = None
+    
+    async def process_queries_batch(
+        self,
+        queries: List[str],
+        progress_callback: Optional[Callable] = None,
+        on_req_id_received: Optional[Callable] = None,
+        batch_size: int = 50,  # Безопасный размер батча: отправил 50 → получил → следующие 50
+        completion_threshold: float = 0.95  # Ждём 95% перед следующим батчем
+    ) -> Dict[str, Any]:
+        """
+        Массовая обработка запросов в асинхронном режиме с батчевой отправкой
+        
+        Стратегия: Отправляем батч → ждём получения → отправляем следующий батч
+        Это предотвращает перегрузку соединений и обеспечивает стабильность.
+        
+        Args:
+            queries: Список запросов
+            progress_callback: Callback(current, total, query, status)
+            on_req_id_received: Callback(query, req_id) при получении req_id
+            batch_size: Размер батча (по умолчанию 50 - безопасный размер)
+            completion_threshold: Порог завершения перед следующим батчем (0.95 = 95%)
+            
+        Returns:
+            Dict с результатами и статистикой
+        """
+        # Создаём сессию один раз в начале обработки
+        await self._ensure_session()
+        
+        total = len(queries)
+        print(f"\n🚀 Массовая отправка {total} запросов в async режиме xmlstock")
+        print(f"   📦 Стратегия: ОТПРАВИЛ {batch_size} → ПОЛУЧИЛ → СЛЕДУЮЩИЕ {batch_size}")
+        print(f"   Порог завершения батча: {completion_threshold*100:.0f}% перед следующим")
+        print(f"   🔄 Параллельность отправки: {self.max_concurrent_send} (консервативно для стабильности)")
+        print(f"   📥 Параллельность получения: {self.max_concurrent_fetch}")
+        print(f"   ⚡ Rate limit: {self.requests_per_second:.0f} запросов/сек")
+        print(f"   ⏳ Попыток получения на батч: {self.max_attempts} (ждём завершения)")
+        print()
+        
+        # Разбиваем на батчи
+        batches = []
+        for i in range(0, total, batch_size):
+            batch = queries[i:i + batch_size]
+            batches.append(batch)
+        
+        print(f"📦 Всего батчей: {len(batches)}")
+        print()
+        
+        all_results = []
+        all_failed_send = []
+        all_failed_fetch = []
+        total_sent = 0
+        
+        # Обрабатываем каждый батч
+        for batch_num, batch_queries in enumerate(batches, 1):
+            batch_total = len(batch_queries)
+            print(f"{'='*80}")
+            print(f"📦 БАТЧ {batch_num}/{len(batches)}: {batch_total} запросов")
+            print(f"{'='*80}")
+            
+            # Периодически пересоздаём сессию для предотвращения проблем с соединениями
+            # Каждые 20 батчей (20 * 50 = 1000 запросов)
+            if batch_num > 1 and batch_num % 20 == 1:
+                print(f"🔄 Пересоздание сессии для свежести соединений (каждые 1000 запросов)...")
+                await self.close()
+                await asyncio.sleep(1.0)  # Даём время полностью закрыться
+                await self._ensure_session()
+                print(f"✓ Сессия пересоздана")
+                print()
+            
+            # ========================================
+            # ЭТАП 1: Отправка батча (получение req_id)
+            # ========================================
+            print(f"📤 Отправка запросов с delayed=1...")
+            
+            send_semaphore = asyncio.Semaphore(self.max_concurrent_send)
+            send_tasks = []
+            
+            for i, query in enumerate(batch_queries, 1):
+                global_index = (batch_num - 1) * batch_size + i
+                task = self._send_delayed_request(
+                    query, 
+                    global_index, 
+                    total, 
+                    send_semaphore,
+                    progress_callback,
+                    on_req_id_received
+                )
+                send_tasks.append(task)
+            
+            # Отправляем все запросы батча параллельно
+            pending_requests = await asyncio.gather(*send_tasks, return_exceptions=True)
+            
+            # Фильтруем успешные
+            valid_pending = []
+            failed_queries = []
+            
+            for i, result in enumerate(pending_requests):
+                if isinstance(result, Exception):
+                    query = batch_queries[i] if i < len(batch_queries) else "Unknown"
+                    error_msg = str(result)
+                    failed_queries.append({
+                        'query': query,
+                        'error': error_msg
+                    })
+                elif isinstance(result, PendingRequest):
+                    valid_pending.append(result)
+                else:
+                    query = batch_queries[i] if i < len(batch_queries) else "Unknown"
+                    failed_queries.append({
+                        'query': query,
+                        'error': "Unknown error"
+                    })
+            
+            total_sent += len(valid_pending)
+            all_failed_send.extend(failed_queries)
+            
+            print(f"✓ Отправлено: {len(valid_pending)}/{batch_total}")
+            if failed_queries:
+                print(f"⚠️  Ошибок отправки в батче: {len(failed_queries)}")
+                # Показываем первые 3 ошибки для диагностики
+                for i, failed in enumerate(failed_queries[:3], 1):
+                    query_preview = failed['query'][:50] + "..." if len(failed['query']) > 50 else failed['query']
+                    error_preview = failed['error'][:100] + "..." if len(failed['error']) > 100 else failed['error']
+                    print(f"   {i}. '{query_preview}': {error_preview}")
+                if len(failed_queries) > 3:
+                    print(f"   ... и ещё {len(failed_queries) - 3} ошибок")
+            print()
+            
+            if not valid_pending:
+                print(f"⚠️  Батч {batch_num}: нет успешных отправок, переходим к следующему")
+                print(f"   💡 Все запросы в батче завершились ошибкой. Проверьте:")
+                print(f"      • Подключение к интернету")
+                print(f"      • Доступность API xmlstock")
+                print(f"      • Правильность API ключа")
+                print()
+                
+                # Если слишком много ошибок подряд - предупреждаем
+                if batch_num >= 3 and len(all_failed_send) == batch_num * batch_size:
+                    print(f"⚠️  ВНИМАНИЕ: {batch_num} батчей подряд завершились ошибками!")
+                    print(f"   Возможно проблема с подключением к xmlstock API.")
+                    print(f"   Рекомендуется проверить подключение и повторить попытку позже.\n")
+                
+                continue
+            
+            # ========================================
+            # ЭТАП 2: Ожидание перед первой проверкой
+            # ========================================
+            print(f"⏳ Ожидание {self.initial_delay} сек перед первой проверкой...")
+            await asyncio.sleep(self.initial_delay)
+            print()
+            
+            # ========================================
+            # ЭТАП 3: Получение результатов батча
+            # ========================================
+            print(f"📥 Получение результатов батча...")
+            
+            fetch_semaphore = asyncio.Semaphore(self.max_concurrent_fetch)
+            batch_results = []
+            batch_failed_fetch = []
+            
+            # Повторяем до max_attempts попыток или пока не получим нужный процент
+            remaining = valid_pending[:]
+            target_completed = int(len(valid_pending) * completion_threshold)
+            
+            for attempt in range(self.max_attempts):
+                if not remaining:
+                    break
+                
+                # Для маленьких батчей (≤50): достаточно получить все или почти все
+                # Для больших батчей: используем порог completion_threshold
+                if len(valid_pending) <= 50:
+                    # Маленький батч: ждём все или переходим после 10 попыток
+                    if not remaining or attempt >= 10:
+                        if remaining:
+                            print(f"\n⏭️  Переход после {attempt + 1} попыток: {len(batch_results)}/{len(valid_pending)} получено")
+                        break
+                else:
+                    # Большой батч: используем порог
+                    if len(batch_results) >= target_completed:
+                        print(f"\n✓ Достигнут порог завершения: {len(batch_results)}/{len(valid_pending)} ({len(batch_results)/len(valid_pending)*100:.1f}%)")
+                        print(f"   Переходим к следующему батчу...")
+                        break
+                
+                if self.max_attempts >= 50:
+                    print(f"\n   Попытка {attempt + 1}: проверка {len(remaining)} запросов...")
+                else:
+                    print(f"\n   Попытка {attempt + 1}/{self.max_attempts}: проверка {len(remaining)} запросов...")
+                
+                # Параллельно запрашиваем результаты
+                fetch_tasks = []
+                for pending in remaining:
+                    task = self._fetch_result_by_req_id(
+                        pending,
+                        fetch_semaphore,
+                        progress_callback
+                    )
+                    fetch_tasks.append(task)
+                
+                fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+                
+                # Разбираем результаты
+                still_pending = []
+                
+                for i, result in enumerate(fetch_results):
+                    if isinstance(result, Exception):
+                        pending = remaining[i]
+                        pending.attempts += 1
+                        pending.last_error = str(result)
+                        still_pending.append(pending)
+                    
+                    elif isinstance(result, dict):
+                        if result.get('status') == 'pending':
+                            pending = remaining[i]
+                            pending.attempts += 1
+                            still_pending.append(pending)
+                        
+                        elif result.get('status') == 'retry_503':
+                            pending = remaining[i]
+                            pending.attempts += 1
+                            pending.last_error = result.get('error', '503 Service Temporarily Unavailable')
+                            still_pending.append(pending)
+                        
+                        elif result.get('status') == 'completed':
+                            batch_results.append(result)
+                        
+                        else:
+                            batch_failed_fetch.append(result)
+                
+                print(f"   ✓ Получено: {len(batch_results)}/{len(valid_pending)} ({len(batch_results)/len(valid_pending)*100:.1f}%)")
+                print(f"   ⏳ Ещё ожидают (202): {len(still_pending)}")
+                if batch_failed_fetch:
+                    print(f"   ❌ Ошибок: {len(batch_failed_fetch)}")
+                
+                # Обновляем список ожидающих
+                remaining = still_pending
+                
+                # Если ещё есть ожидающие и не последняя попытка - ждём
+                if remaining and attempt < self.max_attempts - 1:
+                    # Проверяем глобальный флаг 503
+                    async with self._get_503_lock():
+                        if self._last_503_time is not None:
+                            time_since_503 = time.time() - self._last_503_time
+                            if time_since_503 < 60:
+                                delay = 60 - time_since_503
+                                print(f"   ⚠️  Сервер был перегружен (503). Ожидание {delay:.1f} сек...")
+                                await asyncio.sleep(delay)
+                                self._last_503_time = None
+                            else:
+                                delay = self.retry_delay
+                                print(f"   Ожидание {delay} сек перед следующей попыткой...")
+                                await asyncio.sleep(delay)
+                        else:
+                            delay = self.retry_delay
+                            print(f"   Ожидание {delay} сек перед следующей попыткой...")
+                            await asyncio.sleep(delay)
+            
+            # Оставшиеся после всех попыток = failed
+            for pending in remaining:
+                batch_failed_fetch.append({
+                    'query': pending.query,
+                    'req_id': pending.req_id,
+                    'status': 'failed',
+                    'error': f"Not ready after {self.max_attempts} attempts: {pending.last_error}"
+                })
+            
+            all_results.extend(batch_results)
+            all_failed_fetch.extend(batch_failed_fetch)
+            
+            print(f"\n✓ Батч {batch_num} завершён:")
+            print(f"   Успешно: {len(batch_results)}/{batch_total}")
+            print(f"   Ошибок отправки: {len(failed_queries)}")
+            print(f"   Ошибок получения: {len(batch_failed_fetch)}")
+            
+            # Если не последний батч - небольшая пауза перед следующим
+            if batch_num < len(batches):
+                pause_time = 2  # Уменьшили паузу т.к. батчи меньше (50 вместо 200)
+                # Увеличиваем паузу если было много ошибок
+                if len(failed_queries) > batch_total * 0.5:
+                    pause_time = 10
+                    print(f"\n⏸️  Увеличенная пауза {pause_time} сек (много ошибок в батче)...\n")
+                else:
+                    print(f"\n⏸️  Пауза {pause_time} сек перед следующим батчем...\n")
+                await asyncio.sleep(pause_time)
+        
+        # Преобразуем ошибки отправки в формат результатов
+        failed_send_results = []
+        for failed in all_failed_send:
+            failed_send_results.append({
+                'query': failed['query'],
+                'req_id': None,
+                'status': 'failed',
+                'error': failed['error']
+            })
+        
+        print(f"\n{'='*80}")
+        print(f"✅ Массовая загрузка завершена")
+        print(f"   Всего: {total}")
+        print(f"   Успешно: {len(all_results)}")
+        print(f"   Ошибок отправки: {len(all_failed_send)}")
+        print(f"   Ошибок получения: {len(all_failed_fetch)}")
+        print(f"{'='*80}\n")
+        
+        return {
+            'results': all_results + all_failed_fetch + failed_send_results,
+            'stats': {
+                'total': total,
+                'sent': total_sent,
+                'completed': len(all_results),
+                'failed_send': len(all_failed_send),
+                'failed_fetch': len([f for f in all_failed_fetch if f.get('status') == 'failed'])
+            }
+        }
+    
+    async def _send_delayed_request(
+        self,
+        query: str,
+        index: int,
+        total: int,
+        semaphore: asyncio.Semaphore,
+        progress_callback: Optional[Callable],
+        on_req_id_received: Optional[Callable]
+    ) -> PendingRequest:
+        """Отправить запрос с delayed=1 и получить req_id"""
+        
+        async with semaphore:
+            params = {
+                'user': self.user,
+                'key': self.key,
+                'query': query,
+                'lr': self.lr,
+                'groupby': 'attr=d.mode=deep.groups-on-page=20.docs-in-group=1',
+                'maxpassages': 2,
+                'filter': 'moderate',
+                'delayed': '1'
+            }
+            
+            # Retry логика для ошибок 503 (перегрузка сервера) и сетевых ошибок
+            max_retries = 3
+            for retry_attempt in range(max_retries):
+                # Проверяем, был ли недавно 503 от других запросов
+                await self._check_and_wait_for_503()
+                
+                # Rate limiting: соблюдаем лимит запросов в секунду
+                await self._wait_for_rate_limit()
+                
+                try:
+                    # Убеждаемся что сессия активна
+                    await self._ensure_session()
+                    
+                    # Проверяем что сессия не была закрыта между вызовами
+                    if self._session is None or self._session.closed:
+                        raise aiohttp.ClientConnectionError("Session is closed or None")
+                    
+                    async with self._session.get(
+                        self.url,
+                        params=params,
+                        timeout=aiohttp.ClientTimeout(total=10)
+                    ) as response:
+                        # Проверяем HTTP статус код
+                        if response.status != 200:
+                            error_text = await response.text()
+                            # Пытаемся извлечь информацию об ошибке из HTML
+                            if response.status == 503:
+                                # Отмечаем глобально что сервер перегружен
+                                await self._mark_503_error()
+                                
+                                # Проверяем на HTML страницу с ошибкой
+                                if '<html' in error_text.lower() or '<title>' in error_text.lower():
+                                    title_match = re.search(r'<title>([^<]+)</title>', error_text, re.IGNORECASE)
+                                    title = title_match.group(1) if title_match else "Service Temporarily Unavailable"
+                                    
+                                    # Если не последняя попытка - ждём 60 сек и повторяем
+                                    if retry_attempt < max_retries - 1:
+                                        print(f"   ⚠️  Сервер перегружен (503) для запроса '{query[:50]}...'. Ожидание 60 сек перед повтором...")
+                                        await asyncio.sleep(60)
+                                        continue  # Повторяем попытку
+                                    
+                                    raise Exception(f"HTTP {response.status} {title} (сервер временно недоступен после {max_retries} попыток)")
+                                else:
+                                    # 503 но не HTML - тоже ждём
+                                    if retry_attempt < max_retries - 1:
+                                        print(f"   ⚠️  Сервер перегружен (503) для запроса '{query[:50]}...'. Ожидание 60 сек перед повтором...")
+                                        await asyncio.sleep(60)
+                                        continue
+                                    
+                                    raise Exception(f"HTTP {response.status}: {error_text[:200]}")
+                            raise Exception(f"HTTP {response.status}: {error_text[:200]}")
+                    
+                    xml_text = await response.text()
+                    
+                    # Проверяем что ответ не HTML (может быть ошибка сервера)
+                    if xml_text.strip().lower().startswith('<html'):
+                        # Пытаемся извлечь информацию об ошибке из HTML
+                        title_match = re.search(r'<title>([^<]+)</title>', xml_text, re.IGNORECASE)
+                        title = title_match.group(1) if title_match else "Server Error"
+                        h1_match = re.search(r'<h1[^>]*>([^<]+)</h1>', xml_text, re.IGNORECASE)
+                        h1 = h1_match.group(1) if h1_match else ""
+                        error_msg = f"{title}" + (f": {h1}" if h1 else "")
+                        raise Exception(f"Сервер вернул HTML вместо XML: {error_msg}")
+                    
+                    # Проверяем на ошибки API
+                    if '<error' in xml_text:
+                        error_match = re.search(r'<error[^>]*code="([^"]*)"[^>]*>([^<]+)</error>', xml_text)
+                        if error_match:
+                            error_code = error_match.group(1)
+                            error_msg = error_match.group(2)
+                            raise Exception(f"API error (code={error_code}): {error_msg}")
+                        else:
+                            # Пытаемся извлечь текст ошибки другим способом
+                            error_match = re.search(r'<error[^>]*>([^<]+)</error>', xml_text)
+                            error_msg = error_match.group(1) if error_match else xml_text[:200]
+                            raise Exception(f"API error: {error_msg}")
+                    
+                    # Извлекаем req_id
+                    req_id_match = re.search(r'<req_id>([^<]+)</req_id>', xml_text)
+                    if not req_id_match:
+                        raise Exception(f"No req_id in response (возможно ошибка API): {xml_text[:200]}")
+                    
+                    req_id = req_id_match.group(1)
+                    
+                    # Сохраняем req_id в БД СРАЗУ после получения
+                    # При ошибке сохранения callback делает паузу и повторяет попытку
+                    # Это даёт БД время восстановиться при временных проблемах
+                    if on_req_id_received:
+                        try:
+                            on_req_id_received(query, req_id)
+                        except Exception as e:
+                            # Ошибка сохранения - логируем, но продолжаем отправку
+                            # Callback сам обрабатывает повторные попытки
+                            print(f"   ⚠️  Ошибка в callback сохранения req_id для '{query[:50]}...': {e}")
+                    
+                    # Progress callback
+                    if progress_callback and index % 50 == 0:
+                        progress_callback(index, total, query, 'sent')
+                    
+                    return PendingRequest(
+                        query=query,
+                        req_id=req_id,
+                        sent_at=datetime.now()
+                    )
+                
+                except asyncio.TimeoutError:
+                    if retry_attempt < max_retries - 1:
+                        await asyncio.sleep(2)  # Короткая пауза перед повтором
+                        continue
+                    raise Exception(f"Timeout при отправке запроса (10 сек) после {max_retries} попыток")
+                except (aiohttp.ClientError, aiohttp.ClientConnectionError, ConnectionResetError, OSError) as e:
+                    # Сетевые ошибки (Connection closed и т.д.) - пробуем повторить
+                    error_msg = f"{type(e).__name__} - {str(e)}"
+                    
+                    if retry_attempt < max_retries - 1:
+                        wait_time = (retry_attempt + 1) * 2  # 2, 4, 6 сек
+                        
+                        # ВСЕГДА пересоздаём сессию при сетевых ошибках
+                        try:
+                            async with self._session_lock:
+                                if self._session:
+                                    try:
+                                        # Закрываем connector первым
+                                        if hasattr(self._session, '_connector') and self._session._connector:
+                                            if not self._session._connector.closed:
+                                                await self._session._connector.close()
+                                        # Затем сессию
+                                        if not self._session.closed:
+                                            await self._session.close()
+                                        await asyncio.sleep(0.5)  # Увеличенное время ожидания
+                                    except:
+                                        pass
+                                    finally:
+                                        self._session = None
+                            
+                            # Создаём новую сессию
+                            await self._ensure_session()
+                        except Exception as recreate_error:
+                            # Если не можем пересоздать сессию - ждём дольше
+                            wait_time = wait_time * 2
+                        
+                        await asyncio.sleep(wait_time)
+                        continue
+                    raise Exception(f"Сетевая ошибка после {max_retries} попыток: {error_msg}")
+                except Exception as e:
+                    # Если уже наше исключение с информацией - пробрасываем как есть
+                    if "API error" in str(e) or "No req_id" in str(e):
+                        if retry_attempt < max_retries - 1:
+                            await asyncio.sleep(2)
+                            continue
+                        raise Exception(f"Запрос '{query}': {str(e)}")
+                    raise Exception(f"Запрос '{query}': {type(e).__name__} - {str(e)}")
+    
+    async def _fetch_result_by_req_id(
+        self,
+        pending: PendingRequest,
+        semaphore: asyncio.Semaphore,
+        progress_callback: Optional[Callable]
+    ) -> Dict[str, Any]:
+        """Получить результат по req_id"""
+        
+        async with semaphore:
+            # Проверяем, был ли недавно 503 от других запросов
+            await self._check_and_wait_for_503()
+            
+            # Rate limiting: соблюдаем лимит запросов в секунду
+            await self._wait_for_rate_limit()
+            
+            # Убеждаемся что сессия активна
+            await self._ensure_session()
+            
+            # Проверяем что сессия не была закрыта между вызовами
+            if self._session is None or self._session.closed:
+                raise aiohttp.ClientConnectionError("Session is closed or None")
+            
+            params = {
+                'user': self.user,
+                'key': self.key,
+                'req_id': pending.req_id
+            }
+            
+            try:
+                async with self._session.get(
+                    self.url,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    # Проверяем HTTP статус код
+                    if response.status != 200:
+                        error_text = await response.text()
+                        # Пытаемся извлечь информацию об ошибке из HTML
+                        if response.status == 503:
+                            # Отмечаем глобально что сервер перегружен
+                            await self._mark_503_error()
+                            
+                            if '<html' in error_text.lower() or '<title>' in error_text.lower():
+                                title_match = re.search(r'<title>([^<]+)</title>', error_text, re.IGNORECASE)
+                                title = title_match.group(1) if title_match else "Service Temporarily Unavailable"
+                                # Возвращаем специальный статус для retry с задержкой
+                                return {
+                                    'query': pending.query,
+                                    'req_id': pending.req_id,
+                                    'status': 'retry_503',
+                                    'error': f"HTTP {response.status} {title} (сервер временно недоступен)",
+                                    'xml_response': error_text
+                                }
+                            else:
+                                # 503 но не HTML - тоже retry
+                                return {
+                                    'query': pending.query,
+                                    'req_id': pending.req_id,
+                                    'status': 'retry_503',
+                                    'error': f"HTTP {response.status}: {error_text[:200]}",
+                                    'xml_response': error_text
+                                }
+                        return {
+                            'query': pending.query,
+                            'req_id': pending.req_id,
+                            'status': 'error',
+                            'error': f"HTTP {response.status}: {error_text[:200]}",
+                            'xml_response': error_text
+                        }
+                    
+                    xml_text = await response.text()
+                    
+                    # Проверяем что ответ не HTML (может быть ошибка сервера)
+                    if xml_text.strip().lower().startswith('<html'):
+                        title_match = re.search(r'<title>([^<]+)</title>', xml_text, re.IGNORECASE)
+                        title = title_match.group(1) if title_match else "Server Error"
+                        h1_match = re.search(r'<h1[^>]*>([^<]+)</h1>', xml_text, re.IGNORECASE)
+                        h1 = h1_match.group(1) if h1_match else ""
+                        error_msg = f"{title}" + (f": {h1}" if h1 else "")
+                        return {
+                            'query': pending.query,
+                            'req_id': pending.req_id,
+                            'status': 'error',
+                            'error': f"Сервер вернул HTML вместо XML: {error_msg}",
+                            'xml_response': xml_text
+                        }
+                    
+                    # Проверяем на 202 (ещё не готово)
+                    if 'code="202"' in xml_text or 'не обработан' in xml_text:
+                        return {
+                            'query': pending.query,
+                            'req_id': pending.req_id,
+                            'status': 'pending',
+                            'message': 'Result not ready yet (202)'
+                        }
+                    
+                    # Проверяем на ошибки
+                    if '<error' in xml_text:
+                        error_match = re.search(r'<error[^>]*>([^<]+)</error>', xml_text)
+                        error_msg = error_match.group(1) if error_match else xml_text[:200]
+                        return {
+                            'query': pending.query,
+                            'req_id': pending.req_id,
+                            'status': 'error',
+                            'error': error_msg,
+                            'xml_response': xml_text
+                        }
+                    
+                    # Успешный ответ
+                    return {
+                        'query': pending.query,
+                        'req_id': pending.req_id,
+                        'status': 'completed',
+                        'xml_response': xml_text
+                    }
+            
+            except (aiohttp.ClientError, aiohttp.ClientConnectionError, ConnectionResetError, OSError) as e:
+                # Сетевые ошибки - пересоздаём сессию и возвращаем pending для повтора
+                try:
+                    async with self._session_lock:
+                        if self._session:
+                            try:
+                                # Закрываем connector первым
+                                if hasattr(self._session, '_connector') and self._session._connector:
+                                    if not self._session._connector.closed:
+                                        await self._session._connector.close()
+                                # Затем сессию
+                                if not self._session.closed:
+                                    await self._session.close()
+                                await asyncio.sleep(0.5)
+                            except:
+                                pass
+                            finally:
+                                self._session = None
+                    
+                    # Пытаемся пересоздать сессию
+                    await self._ensure_session()
+                except Exception:
+                    # Если не можем пересоздать - не критично, попробуем в следующий раз
+                    pass
+                
+                # Возвращаем pending для повтора (вместо error)
+                return {
+                    'query': pending.query,
+                    'req_id': pending.req_id,
+                    'status': 'pending',
+                    'message': f"Connection error (will retry): {type(e).__name__} - {str(e)}"
+                }
+            except asyncio.TimeoutError:
+                # Таймауты - тоже повторяем
+                return {
+                    'query': pending.query,
+                    'req_id': pending.req_id,
+                    'status': 'pending',
+                    'message': 'Request timeout (will retry)'
+                }
+            except Exception as e:
+                return {
+                    'query': pending.query,
+                    'req_id': pending.req_id,
+                    'status': 'error',
+                    'error': f"Fetch error: {type(e).__name__} - {str(e)}"
+                }
+
+
+__all__ = ['AsyncBatchSERPClient', 'PendingRequest']
+

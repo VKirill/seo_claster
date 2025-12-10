@@ -1,0 +1,883 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SEO Cluster Manager</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    .header {
+      background: white;
+      padding: 30px;
+      border-radius: 15px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+      margin-bottom: 30px;
+    }
+
+    .header h1 {
+      color: #667eea;
+      font-size: 32px;
+      margin-bottom: 10px;
+    }
+
+    .header p {
+      color: #666;
+      font-size: 16px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+
+    @media (max-width: 1024px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .card {
+      background: white;
+      padding: 25px;
+      border-radius: 15px;
+      box-shadow: 0 5px 20px rgba(0, 0, 0, 0.1);
+    }
+
+    .card h2 {
+      color: #333;
+      font-size: 22px;
+      margin-bottom: 20px;
+      padding-bottom: 10px;
+      border-bottom: 2px solid #f0f0f0;
+    }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 15px;
+      margin-top: 15px;
+    }
+
+    .stat-item {
+      background: #f8f9fa;
+      padding: 15px;
+      border-radius: 10px;
+      text-align: center;
+    }
+
+    .stat-value {
+      font-size: 28px;
+      font-weight: bold;
+      color: #667eea;
+      margin-bottom: 5px;
+    }
+
+    .stat-label {
+      font-size: 13px;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .group-list {
+      max-height: 500px;
+      overflow-y: auto;
+    }
+
+    .group-item {
+      background: #f8f9fa;
+      padding: 15px;
+      margin-bottom: 10px;
+      border-radius: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      transition: all 0.3s;
+    }
+
+    .group-item:hover {
+      background: #e9ecef;
+      transform: translateX(5px);
+    }
+
+    .group-info {
+      flex: 1;
+    }
+
+    .group-name {
+      font-size: 18px;
+      font-weight: bold;
+      color: #333;
+      margin-bottom: 5px;
+    }
+
+    .group-meta {
+      font-size: 13px;
+      color: #666;
+    }
+
+    .group-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+      text-decoration: none;
+      display: inline-block;
+    }
+
+    .btn:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+    }
+
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .btn-primary {
+      background: #667eea;
+      color: white;
+    }
+
+    .btn-success {
+      background: #28a745;
+      color: white;
+    }
+
+    .btn-danger {
+      background: #dc3545;
+      color: white;
+    }
+
+    .btn-warning {
+      background: #ffc107;
+      color: #333;
+    }
+
+    .btn-info {
+      background: #17a2b8;
+      color: white;
+    }
+
+    .btn-sm {
+      padding: 8px 15px;
+      font-size: 12px;
+    }
+
+    .upload-area {
+      border: 3px dashed #ddd;
+      border-radius: 10px;
+      padding: 40px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.3s;
+      margin-bottom: 20px;
+    }
+
+    .upload-area:hover {
+      border-color: #667eea;
+      background: #f8f9fa;
+    }
+
+    .upload-area.dragover {
+      border-color: #667eea;
+      background: #e7f1ff;
+    }
+
+    .upload-icon {
+      font-size: 48px;
+      color: #667eea;
+      margin-bottom: 15px;
+    }
+
+    #file-input {
+      display: none;
+    }
+
+    .alert {
+      padding: 15px 20px;
+      border-radius: 10px;
+      margin-bottom: 20px;
+      display: none;
+    }
+
+    .alert.show {
+      display: block;
+      animation: slideIn 0.3s;
+    }
+
+    @keyframes slideIn {
+      from {
+        opacity: 0;
+        transform: translateY(-10px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .alert-success {
+      background: #d4edda;
+      color: #155724;
+      border-left: 4px solid #28a745;
+    }
+
+    .alert-error {
+      background: #f8d7da;
+      color: #721c24;
+      border-left: 4px solid #dc3545;
+    }
+
+    .alert-info {
+      background: #d1ecf1;
+      color: #0c5460;
+      border-left: 4px solid #17a2b8;
+    }
+
+    .loading {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 3px solid #f3f3f3;
+      border-top: 3px solid #667eea;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      0% {
+        transform: rotate(0deg);
+      }
+
+      100% {
+        transform: rotate(360deg);
+      }
+    }
+
+    .modal {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.7);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal.show {
+      display: flex;
+    }
+
+    .modal-content {
+      background: white;
+      padding: 30px;
+      border-radius: 15px;
+      max-width: 700px;
+      width: 90%;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      padding-bottom: 15px;
+      border-bottom: 2px solid #f0f0f0;
+    }
+
+    .modal-close {
+      font-size: 28px;
+      cursor: pointer;
+      color: #999;
+      line-height: 1;
+    }
+
+    .modal-close:hover {
+      color: #333;
+    }
+
+    pre {
+      background: #f8f9fa;
+      padding: 15px;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+
+    .file-item {
+      padding: 10px;
+      background: #f8f9fa;
+      border-radius: 8px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 5px;
+      font-size: 11px;
+      font-weight: bold;
+      margin-left: 8px;
+    }
+
+    .badge-success {
+      background: #28a745;
+      color: white;
+    }
+
+    .badge-warning {
+      background: #ffc107;
+      color: #333;
+    }
+
+    .info-row {
+      margin-bottom: 15px;
+      padding: 10px;
+      background: #f8f9fa;
+      border-radius: 8px;
+    }
+
+    .info-row strong {
+      color: #667eea;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🔍 SEO Cluster Manager</h1>
+      <p>Управление группами запросов, кешами и кластеризацией</p>
+    </div>
+
+    <div id="alert-container"></div>
+
+    <div class="grid">
+      <!-- Статистика кеша -->
+      <div class="card">
+        <h2>💾 Статистика кеша</h2>
+        <div id="cache-stats" class="stat-grid">
+          <div class="loading"></div>
+        </div>
+        <div style="margin-top: 20px; text-align: center;">
+          <button class="btn btn-warning" onclick="clearCache()">🗑️ Очистить кеш</button>
+        </div>
+      </div>
+
+      <!-- Загрузка файлов -->
+      <div class="card">
+        <h2>📤 Загрузка файлов</h2>
+        <div class="upload-area" id="upload-area" onclick="document.getElementById('file-input').click()">
+          <div class="upload-icon">📁</div>
+          <div style="font-size: 16px; color: #333; margin-bottom: 10px;">
+            <strong>Перетащите CSV файл сюда</strong>
+          </div>
+          <div style="font-size: 14px; color: #666;">
+            или нажмите для выбора файла
+          </div>
+        </div>
+        <input type="file" id="file-input" accept=".csv" onchange="handleFileSelect(event)">
+
+        <div style="text-align: center; margin-top: 20px;">
+          <button class="btn btn-success" onclick="runAllClustering()">
+            🚀 Запустить кластеризацию всех групп
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Список групп -->
+    <div class="card">
+      <h2>📊 Группы запросов</h2>
+      <div id="groups-list" class="group-list">
+        <div class="loading"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Модальное окно с информацией о группе -->
+  <div id="group-modal" class="modal" onclick="closeModalOnBackground(event)">
+    <div class="modal-content" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h2 id="modal-title">Информация о группе</h2>
+        <span class="modal-close" onclick="closeModal()">&times;</span>
+      </div>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <script>
+    // API endpoint (для PHP backend)
+    const API_URL = 'api.php';
+
+    // Загрузка данных при старте
+    loadCacheStats();
+    loadGroups();
+
+    // Обновление каждые 10 секунд
+    setInterval(() => {
+      loadCacheStats();
+      loadGroups();
+    }, 10000);
+
+    // Загрузка статистики кеша
+    async function loadCacheStats() {
+      try {
+        console.log('🔍 Загрузка статистики кеша...');
+        const response = await fetch(`${API_URL}?action=get_cache_stats`);
+        console.log('📡 Ответ сервера:', response.status, response.statusText);
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        console.log('📊 Данные:', data);
+
+        let html = '';
+
+        if (!data.exists) {
+          html = '<div class="stat-item"><div class="stat-label">Кеш не найден</div></div>';
+        } else if (data.error) {
+          html = `<div class="stat-item"><div class="stat-label">Ошибка: ${escapeHtml(data.error)}</div></div>`;
+        } else {
+          html = `
+                        <div class="stat-item">
+                            <div class="stat-value">${data.queries || 0}</div>
+                            <div class="stat-label">Всего запросов</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value">${data.groups || 0}</div>
+                            <div class="stat-label">Групп</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value">${data.serp_queries || 0}</div>
+                            <div class="stat-label">С SERP данными</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value">${data.with_intent || 0}</div>
+                            <div class="stat-label">С интентом</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value">${data.size_human || '0 B'}</div>
+                            <div class="stat-label">Размер БД</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Обновлено</div>
+                            <div style="font-size: 12px; color: #666; margin-top: 5px;">${data.modified || '—'}</div>
+                        </div>
+                    `;
+        }
+
+        document.getElementById('cache-stats').innerHTML = html;
+      } catch (error) {
+        console.error('❌ Ошибка загрузки статистики кеша:', error);
+        document.getElementById('cache-stats').innerHTML =
+          `<div class="stat-item">
+                        <div class="stat-label" style="color: #dc3545;">
+                            Ошибка загрузки<br>
+                            <small style="font-size: 11px; text-transform: none;">${error.message}</small>
+                        </div>
+                    </div>`;
+
+        // Показываем предупреждение
+        if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+          showAlert('error', '⚠️ Сервер не запущен! Запустите start_manager.bat');
+        }
+      }
+    }
+
+    // Загрузка списка групп
+    async function loadGroups() {
+      try {
+        console.log('🔍 Загрузка групп...');
+        const response = await fetch(`${API_URL}?action=list_groups`);
+        console.log('📡 Ответ сервера:', response.status, response.statusText);
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const groups = await response.json();
+        console.log('📁 Группы:', groups);
+
+        let html = '';
+
+        if (!groups || groups.length === 0) {
+          html = '<div style="text-align: center; padding: 40px; color: #666;">Нет доступных групп<br><small>Загрузите CSV файлы с запросами</small></div>';
+        } else {
+          groups.forEach(group => {
+            html += `
+                            <div class="group-item">
+                                <div class="group-info">
+                                    <div class="group-name">📁 ${escapeHtml(group.name)}</div>
+                                    <div class="group-meta">
+                                        ${group.queries || 0} запросов · 
+                                        ${group.size_human || '0 B'} · 
+                                        ${group.modified_human || '—'}
+                                    </div>
+                                </div>
+                                <div class="group-actions">
+                                    <button class="btn btn-info btn-sm" onclick="showGroupInfo('${escapeHtml(group.name)}')">
+                                        ℹ️ Инфо
+                                    </button>
+                                    <button class="btn btn-primary btn-sm" onclick="runGroupClustering('${escapeHtml(group.name)}')">
+                                        ▶️ Запустить
+                                    </button>
+                                    <button class="btn btn-danger btn-sm" onclick="deleteGroup('${escapeHtml(group.file)}')">
+                                        🗑️
+                                    </button>
+                                </div>
+                            </div>
+                        `;
+          });
+        }
+
+        document.getElementById('groups-list').innerHTML = html;
+      } catch (error) {
+        console.error('❌ Ошибка загрузки групп:', error);
+        document.getElementById('groups-list').innerHTML =
+          `<div style="text-align: center; padding: 40px; color: #dc3545;">
+                        <strong>Ошибка загрузки групп</strong><br>
+                        <small>${error.message}</small><br><br>
+                        <button class="btn btn-primary" onclick="location.reload()">🔄 Обновить</button>
+                    </div>`;
+
+        // Показываем предупреждение
+        if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+          showAlert('error', '⚠️ Сервер не запущен! Откройте start_manager.bat в новом окне');
+        }
+      }
+    }
+
+    // Показать информацию о группе
+    async function showGroupInfo(groupName) {
+      try {
+        const response = await fetch(`${API_URL}?action=get_group_info&group=${encodeURIComponent(groupName)}`);
+        const data = await response.json();
+
+        let html = '';
+
+        if (data.error) {
+          html = `<div class="alert alert-error show">${escapeHtml(data.error)}</div>`;
+        } else {
+          html = `
+                        <div class="info-row">
+                            <strong>Группа:</strong> ${escapeHtml(data.name)}
+                        </div>
+                        <div class="info-row">
+                            <strong>Закешировано запросов:</strong> ${data.cached_queries || 0}
+                            ${data.cached_queries > 0 ? '<span class="badge badge-success">✓ В кеше</span>' : '<span class="badge badge-warning">Нет в кеше</span>'}
+                        </div>
+                        <div class="info-row">
+                            <strong>Результаты кластеризации:</strong> 
+                            ${data.has_results ? '<span class="badge badge-success">✓ Готово</span>' : '<span class="badge badge-warning">Не запускалась</span>'}
+                        </div>
+                    `;
+
+          if (data.result_files && data.result_files.length > 0) {
+            html += '<h3 style="margin: 20px 0 15px 0; color: #333;">📄 Файлы результатов:</h3>';
+            data.result_files.forEach(file => {
+              html += `
+                                <div class="file-item">
+                                    <span>📄 ${escapeHtml(file.name)}</span>
+                                    <span style="font-size: 12px; color: #666;">
+                                        ${file.size} · ${file.modified}
+                                    </span>
+                                </div>
+                            `;
+            });
+          }
+        }
+
+        document.getElementById('modal-title').textContent = `Информация о группе: ${groupName}`;
+        document.getElementById('modal-body').innerHTML = html;
+        document.getElementById('group-modal').classList.add('show');
+      } catch (error) {
+        showAlert('error', 'Ошибка загрузки информации о группе');
+      }
+    }
+
+    // Закрыть модальное окно
+    function closeModal() {
+      document.getElementById('group-modal').classList.remove('show');
+    }
+
+    function closeModalOnBackground(event) {
+      if (event.target.id === 'group-modal') {
+        closeModal();
+      }
+    }
+
+    // Запуск кластеризации для группы
+    async function runGroupClustering(groupName) {
+      if (!confirm(`Запустить кластеризацию для группы "${groupName}"?\n\nЭто может занять некоторое время.`)) {
+        return;
+      }
+
+      showAlert('info', `Запуск кластеризации для группы "${groupName}"...`);
+
+      try {
+        const formData = new FormData();
+        formData.append('group', groupName);
+
+        const response = await fetch(`${API_URL}?action=run_clustering`, {
+          method: 'POST',
+          body: formData
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+          showAlert('success', data.message || 'Кластеризация запущена');
+          setTimeout(() => {
+            loadCacheStats();
+            loadGroups();
+          }, 2000);
+        } else {
+          showAlert('error', data.error || data.message || 'Ошибка при запуске');
+        }
+      } catch (error) {
+        showAlert('error', 'Ошибка при запуске кластеризации');
+      }
+    }
+
+    // Запуск кластеризации для всех групп
+    async function runAllClustering() {
+      if (!confirm('Запустить кластеризацию для ВСЕХ групп?\n\nЭто может занять продолжительное время.')) {
+        return;
+      }
+
+      showAlert('info', 'Запуск кластеризации для всех групп...');
+
+      try {
+        const formData = new FormData();
+        formData.append('group', 'all');
+
+        const response = await fetch(`${API_URL}?action=run_clustering`, {
+          method: 'POST',
+          body: formData
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+          showAlert('success', 'Кластеризация запущена для всех групп');
+          setTimeout(() => {
+            loadCacheStats();
+            loadGroups();
+          }, 2000);
+        } else {
+          showAlert('error', data.error || data.message || 'Ошибка при запуске');
+        }
+      } catch (error) {
+        showAlert('error', 'Ошибка при запуске кластеризации');
+      }
+    }
+
+    // Обработка выбора файла
+    async function handleFileSelect(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      await uploadFile(file);
+      event.target.value = ''; // Сброс input
+    }
+
+    // Загрузка файла
+    async function uploadFile(file) {
+      if (!file.name.toLowerCase().endsWith('.csv')) {
+        showAlert('error', 'Разрешены только CSV файлы');
+        return;
+      }
+
+      // Проверка размера файла (50MB)
+      if (file.size > 50 * 1024 * 1024) {
+        showAlert('error', `Файл слишком большой (макс 50MB, размер: ${(file.size / 1024 / 1024).toFixed(2)}MB)`);
+        return;
+      }
+
+      showAlert('info', `Загрузка файла: ${file.name} (${(file.size / 1024).toFixed(2)}KB)...`);
+
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const response = await fetch(`${API_URL}?action=upload_file`, {
+          method: 'POST',
+          body: formData
+        });
+
+        if (!response.ok) {
+          const text = await response.text();
+          console.error('Ошибка HTTP:', response.status, text);
+          showAlert('error', `Ошибка сервера (HTTP ${response.status}): ${text.substring(0, 100)}`);
+          return;
+        }
+
+        const data = await response.json();
+        console.log('Ответ сервера:', data);
+
+        if (data.success) {
+          showAlert('success', data.message || `Файл успешно загружен: ${data.filename}`);
+          loadGroups();
+        } else {
+          const errorMsg = data.error || 'Неизвестная ошибка при загрузке';
+          console.error('Ошибка загрузки:', errorMsg);
+          showAlert('error', `Ошибка: ${errorMsg}`);
+        }
+      } catch (error) {
+        console.error('Исключение при загрузке:', error);
+        showAlert('error', `Ошибка при загрузке файла: ${error.message}`);
+      }
+    }
+
+    // Удаление группы
+    async function deleteGroup(filename) {
+      if (!confirm(`Удалить файл "${filename}"?\n\n(Будет создан бэкап)`)) {
+        return;
+      }
+
+      try {
+        const formData = new FormData();
+        formData.append('filename', filename);
+
+        const response = await fetch(`${API_URL}?action=delete_file`, {
+          method: 'POST',
+          body: formData
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+          showAlert('success', data.message || 'Файл удален');
+          loadGroups();
+        } else {
+          showAlert('error', data.error || 'Ошибка при удалении');
+        }
+      } catch (error) {
+        showAlert('error', 'Ошибка при удалении файла');
+      }
+    }
+
+    // Очистка кеша
+    async function clearCache() {
+      if (!confirm('Очистить весь кеш?\n\n(Будет создан бэкап БД)')) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_URL}?action=clear_cache`, { method: 'POST' });
+        const data = await response.json();
+
+        if (data.success) {
+          showAlert('success', data.message || 'Кеш очищен');
+          loadCacheStats();
+        } else {
+          showAlert('error', data.error || 'Ошибка при очистке');
+        }
+      } catch (error) {
+        showAlert('error', 'Ошибка при очистке кеша');
+      }
+    }
+
+    // Показать уведомление
+    function showAlert(type, message) {
+      const container = document.getElementById('alert-container');
+      const alert = document.createElement('div');
+      alert.className = `alert alert-${type} show`;
+      alert.textContent = message;
+
+      container.innerHTML = '';
+      container.appendChild(alert);
+
+      setTimeout(() => {
+        alert.classList.remove('show');
+        setTimeout(() => alert.remove(), 300);
+      }, 5000);
+    }
+
+    // Экранирование HTML
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Drag & Drop
+    const uploadArea = document.getElementById('upload-area');
+
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+      uploadArea.addEventListener(eventName, preventDefaults, false);
+      document.body.addEventListener(eventName, preventDefaults, false);
+    });
+
+    function preventDefaults(e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+
+    ['dragenter', 'dragover'].forEach(eventName => {
+      uploadArea.addEventListener(eventName, () => {
+        uploadArea.classList.add('dragover');
+      }, false);
+    });
+
+    ['dragleave', 'drop'].forEach(eventName => {
+      uploadArea.addEventListener(eventName, () => {
+        uploadArea.classList.remove('dragover');
+      }, false);
+    });
+
+    uploadArea.addEventListener('drop', (e) => {
+      const file = e.dataTransfer.files[0];
+      if (file) {
+        uploadFile(file);
+      }
+    }, false);
+  </script>
+</body>
+
+</html>

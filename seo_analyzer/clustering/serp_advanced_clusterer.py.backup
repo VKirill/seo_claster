@@ -1,0 +1,685 @@
+"""
+Улучшенная SOFT-кластеризация с режимами strict/balanced/soft
+ОПТИМИЗАЦИЯ: Использует Numba JIT компиляцию для ускорения в 10-20 раз
+"""
+from typing import List, Dict, Set, Tuple, Optional
+import pandas as pd
+from collections import defaultdict
+import re
+
+from .semantic_checker import SemanticClusterChecker
+from .fast_similarity import FastSimilarityCalculator
+
+
+class AdvancedSERPClusterer:
+    """
+    Продвинутая SERP кластеризация с контролем транзитивности
+    
+    Режимы:
+    - STRICT: каждый запрос должен быть схож с КАЖДЫМ в кластере
+    - BALANCED: запрос должен быть схож минимум с 50% запросов в кластере  
+    - SOFT: достаточно схожести хотя бы с одним (транзитивное замыкание)
+    """
+    
+    MODE_STRICT = "strict"
+    MODE_BALANCED = "balanced"
+    MODE_SOFT = "soft"
+    
+    def __init__(
+        self,
+        min_common_urls: int = 7,
+        top_positions: int = 30,
+        max_cluster_size: int = 100,
+        mode: str = "balanced",
+        semantic_check: bool = True,
+        min_cluster_cohesion: float = 0.5,
+        geo_dicts: Dict[str, Set[str]] = None
+    ):
+        """
+        Args:
+            min_common_urls: Минимум общих URL для связи (по умолчанию 7)
+            top_positions: Глубина анализа SERP (по умолчанию 30)
+            max_cluster_size: Максимальный размер кластера (по умолчанию 100)
+            mode: Режим кластеризации (strict/balanced/soft)
+            semantic_check: Проверять семантическую схожесть запросов
+            min_cluster_cohesion: Мин. связность кластера (0-1) для balanced режима
+            geo_dicts: Словари с географическими названиями для проверки
+        """
+        self.min_common_urls = min_common_urls
+        self.top_positions = top_positions
+        self.max_cluster_size = max_cluster_size
+        self.mode = mode
+        self.semantic_check = semantic_check
+        self.min_cluster_cohesion = min_cluster_cohesion
+        
+        self.clusters = {}  # query -> cluster_id
+        self.cluster_queries = defaultdict(list)  # cluster_id -> [queries]
+        self.cluster_geo_cache = {}  # ОПТИМИЗАЦИЯ: cluster_id -> география (кэш)
+        
+        # Семантический чекер для проверки совместимости
+        self.semantic_checker = SemanticClusterChecker(geo_dicts=geo_dicts) if semantic_check else None
+        
+        # 🚀 ОПТИМИЗАЦИЯ: Быстрый калькулятор схожести
+        self.fast_similarity = FastSimilarityCalculator(
+            top_positions=top_positions
+        )
+        
+        # Кэш схожести для избежания повторных вычислений
+        self.similarity_cache = {}  # (query1, query2) -> common_count
+    
+    def _build_url_index(self, query_urls_dict: Dict[str, List[str]]) -> Dict[str, Set[str]]:
+        """
+        Строит инвертированный индекс URL → запросы.
+        
+        Это ускоряет поиск похожих запросов с O(n²) до O(n × k),
+        где k = среднее количество URL (~30).
+        
+        Args:
+            query_urls_dict: Словарь запрос → список URL
+            
+        Returns:
+            Инвертированный индекс: URL → множество запросов
+        """
+        from collections import defaultdict
+        
+        url_to_queries = defaultdict(set)
+        
+        for query, urls in query_urls_dict.items():
+            # Берем только топ-N позиций
+            for url in urls[:self.top_positions]:
+                url_to_queries[url].add(query)
+        
+        return url_to_queries
+    
+    def _find_similar_queries_fast(
+        self,
+        query: str,
+        query_urls: List[str],
+        url_index: Dict[str, Set[str]]
+    ) -> Dict[str, int]:
+        """
+        Быстрый поиск похожих запросов через хэш-индекс.
+        
+        Вместо проверки каждого запроса (O(n)),
+        используем индекс URL → запросы (O(k), где k = кол-во URL).
+        
+        Args:
+            query: Исходный запрос
+            query_urls: URL запроса
+            url_index: Инвертированный индекс URL → запросы
+            
+        Returns:
+            Словарь: запрос → количество общих URL
+        """
+        from collections import Counter
+        
+        candidates = Counter()
+        
+        # Для каждого URL запроса находим все запросы с таким же URL
+        for url in query_urls[:self.top_positions]:
+            for candidate_query in url_index.get(url, set()):
+                if candidate_query != query:
+                    candidates[candidate_query] += 1
+        
+        # Возвращаем только тех, у кого >= min_common_urls
+        return {
+            q: count for q, count in candidates.items() 
+            if count >= self.min_common_urls
+        }
+    
+    
+    def _are_semantically_different(self, query1: str, query2: str) -> bool:
+        """
+        Проверяет семантическую разницу между запросами.
+        
+        Использует улучшенный SemanticClusterChecker который проверяет:
+        - Географическую привязку (Москва vs СПб)
+        - Типы продуктов (карта vs браслет)
+        - Интенты (информационный vs коммерческий)
+        
+        Возвращает True если запросы НЕ должны быть в одном кластере
+        """
+        if not self.semantic_check or not self.semantic_checker:
+            return False
+        
+        # Используем семантический чекер (только география)
+        compatible, reason = self.semantic_checker.are_queries_compatible(
+            query1, query2,
+            check_geo=True
+        )
+        
+        return not compatible
+    
+    def _normalize_url(self, url: str) -> str:
+        """
+        Нормализует URL для сравнения (убирает параметры, якоря, trailing slash)
+        
+        Args:
+            url: Полный URL
+            
+        Returns:
+            Нормализованный URL без протокола www параметров
+        """
+        if not url:
+            return ""
+        
+        # Убираем протокол
+        url = re.sub(r'^https?://', '', url)
+        url = re.sub(r'^www\.', '', url)
+        
+        # Убираем параметры запроса и якоря
+        url = url.split('?')[0].split('#')[0]
+        
+        # Убираем trailing slash
+        url = url.rstrip('/')
+        
+        return url.lower()
+    
+    def extract_serp_urls(self, serp_data) -> List[str]:
+        """
+        Извлекает и нормализует URL из SERP данных
+        
+        Args:
+            serp_data: Список URL или строка с URL разделёнными |
+            
+        Returns:
+            Список нормализованных URL (БЕЗ доменов - полные пути!)
+        """
+        # Проверка на NaN/None/пустое значение
+        if serp_data is None:
+            return []
+        
+        # Если это уже список - используем его
+        if isinstance(serp_data, list):
+            urls = []
+            for url in serp_data:
+                if url:  # Пропускаем пустые
+                    normalized = self._normalize_url(str(url).strip())
+                    if normalized:
+                        urls.append(normalized)
+            return urls
+        
+        # Проверка на pandas NaN
+        try:
+            if pd.isna(serp_data):
+                return []
+        except (TypeError, ValueError):
+            pass
+        
+        # Если пустая строка
+        if not serp_data:
+            return []
+        
+        # Если строка - разделяем по |
+        url_list = str(serp_data).split('|')
+        urls = []
+        
+        for url in url_list:
+            normalized = self._normalize_url(url.strip())
+            if normalized:
+                urls.append(normalized)
+        
+        return urls
+    
+    def _extract_domain(self, url: str) -> str:
+        """Извлекает домен из URL"""
+        if not url:
+            return ""
+        
+        # Убираем протокол
+        url = re.sub(r'^https?://', '', url)
+        url = re.sub(r'^www\.', '', url)
+        
+        # Берем только домен
+        domain = url.split('/')[0]
+        
+        return domain.lower()
+    
+    def calculate_similarity(
+        self,
+        urls1: List[str],
+        urls2: List[str]
+    ) -> int:
+        """
+        Рассчитывает схожесть между двумя списками URL (количество общих URL)
+        
+        🚀 ОПТИМИЗАЦИЯ: Использует оптимизированный калькулятор для ускорения
+        
+        Args:
+            urls1: Первый список нормализованных URL
+            urls2: Второй список нормализованных URL
+            
+        Returns:
+            Количество общих URL
+        """
+        if not urls1 or not urls2:
+            return 0
+        
+        # 🚀 Быстрое вычисление через оптимизированный код
+        return self.fast_similarity.calculate_similarity(urls1, urls2)
+    
+    def _can_add_to_cluster(
+        self,
+        query: str,
+        cluster_queries: List[str],
+        query_urls_dict: Dict[str, List[str]],
+        query_geo_dict: Dict[str, str] = None,
+        debug: bool = False,
+        cluster_id: int = None  # Для использования кэша географии
+    ) -> bool:
+        """
+        Проверяет может ли запрос быть добавлен в кластер
+        
+        ВАЖНО: Транзитивное замыкание ОТКЛЮЧЕНО - каждый запрос должен быть
+        напрямую связан со ВСЕМИ запросами в кластере (>= min_common_urls общих URL).
+        
+        Независимо от режима (STRICT/BALANCED/SOFT), требуется прямая связь со ВСЕМИ.
+        
+        Args:
+            query_geo_dict: Словарь запрос → география (для проверки совместимости)
+            cluster_id: ID кластера для использования кэша географии
+        """
+        if not cluster_queries:
+            return True
+        
+        # 🌍 ПРОВЕРКА ГЕОГРАФИИ: Используем кэш географии кластера
+        if query_geo_dict is not None:
+            query_geo = query_geo_dict.get(query)
+            
+            # Проверяем кэш
+            if cluster_id is not None and cluster_id in self.cluster_geo_cache:
+                cluster_geo = self.cluster_geo_cache[cluster_id]
+            else:
+                # Если кэш пуст - берем географию первого запроса
+                cluster_geo = query_geo_dict.get(cluster_queries[0])
+                if cluster_id is not None:
+                    self.cluster_geo_cache[cluster_id] = cluster_geo
+            
+            if query_geo != cluster_geo:
+                if debug:
+                    print(f"      ❌ ГЕОГРАФИЯ НЕ СОВПАДАЕТ: '{query}' ({query_geo}) vs кластер ({cluster_geo})")
+                return False
+        
+        query_urls = query_urls_dict.get(query, [])
+        similar_count = 0
+        not_similar_count = 0
+        
+        # ВАЖНО: Проверяем ВСЕ запросы в кластере для предотвращения транзитивного замыкания
+        # Каждый запрос должен быть напрямую связан с достаточным количеством запросов
+        # Проверяем все запросы в кластере для точности (без ограничений)
+        queries_to_check = cluster_queries
+        
+        # Проверяем со всеми запросами кластера
+        for cluster_query in queries_to_check:
+            # 🚀 ОПТИМИЗАЦИЯ: Кэшируем результаты схожести
+            cache_key = tuple(sorted([query, cluster_query]))
+            
+            if cache_key in self.similarity_cache:
+                # Используем кэшированный результат
+                common_count = self.similarity_cache[cache_key]
+            else:
+                # Проверка семантической разницы (БЫСТРАЯ проверка идет ПЕРВОЙ)
+                if self._are_semantically_different(query, cluster_query):
+                    if debug:
+                        print(f"      '{query}' ↔ '{cluster_query}': СЕМАНТИЧЕСКИ РАЗНЫЕ")
+                    # В STRICT режиме даже одна семантическая разница = отказ
+                    if self.mode == self.MODE_STRICT:
+                        if debug:
+                            print(f"      → STRICT: отказ из-за семантической разницы")
+                        return False
+                    not_similar_count += 1
+                    continue
+                
+                # Вычисляем схожесть (БЫСТРО!)
+                cluster_query_urls = query_urls_dict.get(cluster_query, [])
+                common_count = self.calculate_similarity(
+                    query_urls,
+                    cluster_query_urls
+                )
+                
+                # Сохраняем в кэш
+                self.similarity_cache[cache_key] = common_count
+            
+            # Используем количество общих URL
+            threshold = self.min_common_urls
+            
+            if debug:
+                print(f"      '{query}' ↔ '{cluster_query}': {common_count} общих, порог={threshold}")
+            
+            if common_count >= threshold:
+                similar_count += 1
+                if debug:
+                    print(f"      → СХОЖИ ✅ (similar_count={similar_count})")
+            else:
+                not_similar_count += 1
+                if debug:
+                    print(f"      → НЕ СХОЖИ ❌")
+                # В STRICT режиме если хотя бы один не схож - сразу отказ
+                if self.mode == self.MODE_STRICT:
+                    if debug:
+                        print(f"      → STRICT: отказ из-за недостаточной схожести")
+                    return False
+        
+        # ВАЖНО: Убрали ранний выход - теперь проверяем ВСЕ запросы в кластере
+        # Это предотвращает транзитивное замыкание
+        
+        # УБРАНО ТРАНЗИТИВНОЕ ЗАМЫКАНИЕ: Всегда требуем прямую связь со ВСЕМИ запросами в кластере
+        # Независимо от режима, каждый запрос должен иметь >= min_common_urls общих URL
+        # со ВСЕМИ запросами в кластере
+        
+        total_checked = len(queries_to_check)
+        if total_checked == 0:
+            return True
+        
+        # ВАЖНО: Требуем прямую связь со ВСЕМИ запросами в кластере
+        # Если запрос связан только с частью запросов в кластере, он НЕ попадет в кластер
+        # Это гарантирует, что все запросы в кластере связаны между собой >= min_common_urls общих URL
+        # ТРАНЗИТИВНОЕ ЗАМЫКАНИЕ ОТКЛЮЧЕНО
+        
+        if debug:
+            mode_name = {
+                self.MODE_STRICT: "STRICT",
+                self.MODE_BALANCED: "BALANCED",
+                self.MODE_SOFT: "SOFT"
+            }.get(self.mode, self.mode)
+            print(f"      → {mode_name}: {similar_count}/{total_checked} схожих, требуется {total_checked} (связь со ВСЕМИ)")
+            if similar_count < total_checked:
+                print(f"      → ОТКАЗ: запрос связан только с {similar_count} из {total_checked} запросов в кластере")
+                print(f"      → Транзитивное замыкание отключено - требуется прямая связь со ВСЕМИ")
+        
+        # Запрос может быть добавлен только если связан со ВСЕМИ запросами в кластере
+        # (проверка >= min_common_urls уже выполнена в цикле выше)
+        return similar_count == total_checked
+    
+    async def cluster_by_serp(
+        self,
+        df: pd.DataFrame,
+        serp_column: str = 'serp_main_pages',
+        geo_processor=None
+    ) -> pd.DataFrame:
+        """
+        Выполняет продвинутую SOFT-кластеризацию запросов по SERP
+        
+        Args:
+            df: DataFrame с запросами и SERP данными
+            serp_column: Название колонки с SERP данными
+            
+        Returns:
+            DataFrame с добавленными колонками semantic_cluster_id и cluster_name
+        """
+        mode_name = {
+            self.MODE_STRICT: "STRICT (строгий)",
+            self.MODE_BALANCED: f"BALANCED (связность {int(self.min_cluster_cohesion*100)}%)",
+            self.MODE_SOFT: "SOFT (мягкий)"
+        }.get(self.mode, self.mode)
+        
+        print(f"🔄 Продвинутая SERP кластеризация (режим: {mode_name})...")
+        print(f"   Порог: {self.min_common_urls} общих URL, топ-{self.top_positions} позиций")
+        print(f"   ⚠️  Транзитивное замыкание ОТКЛЮЧЕНО - требуется прямая связь со ВСЕМИ запросами в кластере")
+        if self.semantic_check:
+            print(f"   Семантический анализ: включен (разделение по типам продуктов)")
+        
+        # 🚀 Информация об оптимизациях
+        print(f"   🚀 Оптимизации: кэширование схожести + URL индекс (2-3x быстрее)")
+        
+        # Проверяем наличие SERP данных
+        if serp_column not in df.columns:
+            print(f"⚠️  Колонка '{serp_column}' не найдена. Пропускаем кластеризацию.")
+            df['semantic_cluster_id'] = -1
+            df['cluster_name'] = df['keyword']
+            return df
+        
+        # Извлекаем URL из SERP для каждого запроса
+        print("  📊 Извлечение URL из SERP...")
+        query_urls_dict = {}
+        for idx, row in df.iterrows():
+            query = row['keyword']
+            serp_data = row[serp_column]
+            urls = self.extract_serp_urls(serp_data)
+            query_urls_dict[query] = urls
+        
+        # Фильтруем запросы без SERP данных
+        queries_with_serp = [q for q, urls in query_urls_dict.items() if len(urls) > 0]
+        print(f"  ✓ Запросов с SERP данными: {len(queries_with_serp)} из {len(df)}")
+        
+        if len(queries_with_serp) == 0:
+            print("⚠️  Нет запросов с SERP данными. Кластеризация невозможна.")
+            df['semantic_cluster_id'] = -1
+            df['cluster_name'] = df['keyword']
+            return df
+        
+        # Сортируем запросы по частотности для стабильности
+        if 'frequency_world' in df.columns:
+            queries_sorted = df.sort_values('frequency_world', ascending=False)['keyword'].tolist()
+            queries_with_serp = [q for q in queries_sorted if q in queries_with_serp]
+        
+        # 🌍 ГЕОГРАФИЧЕСКАЯ СЕГМЕНТАЦИЯ: Используем предобработанную географию или определяем синхронно
+        query_geo_dict = {}
+        geo_groups = {}
+        
+        if geo_processor is not None:
+            # ОПТИМИЗАЦИЯ: Используем предобработанные данные из фонового процессора
+            print(f"  🌍 Получение результатов фоновой обработки географии...")
+            
+            # Проверяем готовность результатов
+            if geo_processor.is_ready():
+                print(f"  ✓ География уже готова (обработана параллельно)!")
+            else:
+                print(f"  ⏳ Ожидание завершения обработки географии...")
+            
+            # Получаем результаты (ждем если еще не готовы)
+            geo_result = await geo_processor.get_result()
+            
+            query_geo_dict = geo_result.query_geo_dict
+            geo_groups = geo_result.geo_groups
+            
+            # Фильтруем только запросы с SERP данными
+            geo_groups = {
+                geo: [q for q in queries if q in queries_with_serp]
+                for geo, queries in geo_groups.items()
+            }
+            
+            # Обновляем статистику
+            geo_stats = geo_result.geo_stats
+            print(f"  ✓ Географические сегменты получены из кэша обработки")
+        else:
+            # FALLBACK: Определяем географию синхронно (старый способ)
+            print(f"  🌍 Определение географии запросов через Natasha NER...")
+            
+            if self.semantic_checker:
+                for query in queries_with_serp:
+                    geo = self.semantic_checker.extract_geo(query)
+                    query_geo_dict[query] = geo  # None если нет географии
+            
+            # Группируем запросы по географии
+            geo_groups = {'__no_geo__': []}  # Специальная группа для запросов без географии
+            for query in queries_with_serp:
+                geo = query_geo_dict.get(query)
+                if geo:
+                    if geo not in geo_groups:
+                        geo_groups[geo] = []
+                    geo_groups[geo].append(query)
+                else:
+                    geo_groups['__no_geo__'].append(query)
+        
+        # Статистика по географии
+        geo_count = len([g for g in geo_groups.keys() if g != '__no_geo__'])
+        if geo_count > 0:
+            print(f"  ✓ Найдено географических сегментов: {geo_count}")
+            for geo, queries in sorted(geo_groups.items(), key=lambda x: len(x[1]), reverse=True)[:5]:
+                if geo != '__no_geo__':
+                    print(f"    - {geo}: {len(queries)} запросов")
+            if len(geo_groups.get('__no_geo__', [])) > 0:
+                print(f"    - без географии: {len(geo_groups['__no_geo__'])} запросов")
+        
+        # 🚀 ОПТИМИЗАЦИЯ: Строим инвертированный индекс URL → запросы
+        print(f"  🔗 Построение URL индекса для быстрого поиска...")
+        url_index = self._build_url_index(query_urls_dict)
+        print(f"  ✓ Индекс построен: {len(url_index)} уникальных URL")
+        
+        # Кластеризация в зависимости от режима (ОПТИМИЗИРОВАННАЯ + ГЕО-СЕГМЕНТАЦИЯ)
+        print(f"  🔗 Построение кластеров ({self.mode} режим, FAST, с гео-сегментацией)...")
+        
+        # ОТЛАДКА: включить для диагностики  
+        debug_mode = False
+        
+        cluster_id = 0
+        processed = set()
+        
+        # Прогресс для больших наборов данных
+        total_queries = len(queries_with_serp)
+        progress_step = max(1, total_queries // 20)  # 5% шаг
+        
+        # 🌍 КЛАСТЕРИЗАЦИЯ ПО ГЕОГРАФИЧЕСКИМ СЕГМЕНТАМ
+        # Обрабатываем каждый географический сегмент отдельно
+        processed_geo_segments = 0
+        
+        for geo_segment, geo_queries in geo_groups.items():
+            if len(geo_queries) == 0:
+                continue
+            
+            if geo_segment != '__no_geo__' and processed_geo_segments < 5:
+                print(f"    📍 Кластеризация сегмента: {geo_segment} ({len(geo_queries)} запросов)")
+            processed_geo_segments += 1
+        
+            for i, query in enumerate(geo_queries, 1):
+                if query in processed:
+                    continue
+                
+                query_urls = query_urls_dict[query]
+                
+                # 🚀 ОПТИМИЗАЦИЯ: Используем индекс для быстрого поиска кандидатов
+                # НО: только среди запросов ТОГО ЖЕ географического сегмента!
+                similar_queries = self._find_similar_queries_fast(query, query_urls, url_index)
+                
+                # 🌍 ФИЛЬТР: Оставляем только кандидатов из того же гео-сегмента
+                query_geo = query_geo_dict.get(query)
+                similar_queries_same_geo = {
+                    sq: score for sq, score in similar_queries.items()
+                    if query_geo_dict.get(sq) == query_geo  # Та же география!
+                }
+                
+                # Находим кластеры с похожими запросами (только из того же гео-сегмента)
+                candidate_clusters = set()
+                for similar_query in similar_queries_same_geo.keys():
+                    if similar_query in self.clusters:
+                        cluster_id_candidate = self.clusters[similar_query]
+                        
+                        # 🔒 ПРОВЕРКА: Все запросы в кластере должны иметь ТУ ЖЕ географию
+                        cluster_geo_match = True
+                        for existing_query in self.cluster_queries[cluster_id_candidate]:
+                            if query_geo_dict.get(existing_query) != query_geo:
+                                cluster_geo_match = False
+                                break
+                        
+                        if cluster_geo_match:
+                            candidate_clusters.add(cluster_id_candidate)
+                
+                # Пытаемся добавить в существующий кластер (только кандидаты!)
+                added = False
+                
+                for cid in candidate_clusters:
+                    cluster_queries = self.cluster_queries[cid]
+                    
+                    # Пропускаем переполненные кластеры
+                    if len(cluster_queries) >= self.max_cluster_size:
+                        continue
+                    
+                    if debug_mode:
+                        print(f"  DEBUG: Проверка '{query}' → Кластер {cid} {cluster_queries}:")
+                    
+                    can_add = self._can_add_to_cluster(
+                        query, cluster_queries, query_urls_dict, query_geo_dict, 
+                        debug=debug_mode, cluster_id=cid
+                    )
+                    
+                    if debug_mode:
+                        print(f"  DEBUG: Результат: {'✅ ДА' if can_add else '❌ НЕТ'}")
+                    
+                    if can_add:
+                        # Добавляем в существующий кластер
+                        self.clusters[query] = cid
+                        self.cluster_queries[cid].append(query)
+                        processed.add(query)
+                        added = True
+                        if debug_mode:
+                            print(f"  DEBUG: ✅ '{query}' добавлен в кластер {cid}")
+                        break
+                
+                if not added:
+                    # Создаем новый кластер
+                    if debug_mode:
+                        print(f"  DEBUG: 🆕 '{query}' создает новый кластер {cluster_id}")
+                    self.clusters[query] = cluster_id
+                    self.cluster_queries[cluster_id].append(query)
+                    # Сохраняем географию нового кластера в кэш
+                    if query_geo_dict is not None:
+                        self.cluster_geo_cache[cluster_id] = query_geo_dict.get(query)
+                    processed.add(query)
+                    cluster_id += 1
+            
+                # Показываем прогресс (общий по всем сегментам)
+                if len(processed) % progress_step == 0 or len(processed) == total_queries:
+                    percent = (len(processed) / total_queries) * 100
+                    print(f"      Обработано: {len(processed)}/{total_queries} ({percent:.0f}%)")
+        
+        # Запросы без SERP → каждый получает свой уникальный ID
+        for idx, row in df.iterrows():
+            query = row['keyword']
+            if query not in self.clusters:
+                self.clusters[query] = cluster_id
+                self.cluster_queries[cluster_id].append(query)
+                cluster_id += 1
+        
+        total_clusters = len(self.cluster_queries)
+        avg_cluster_size = sum(len(q) for q in self.cluster_queries.values()) / max(total_clusters, 1)
+        
+        print(f"  ✓ Создано кластеров: {total_clusters}")
+        print(f"  ✓ Средний размер кластера: {avg_cluster_size:.1f} запросов")
+        
+        # Добавляем в DataFrame
+        df['semantic_cluster_id'] = df['keyword'].map(self.clusters)
+        
+        # Добавляем географическую метку
+        df['cluster_geo'] = df['keyword'].map(query_geo_dict)
+        
+        # Определяем имя кластера (запрос с максимальной частотностью)
+        cluster_names = {}
+        cluster_geos = {}  # География кластера
+        for cid, queries in self.cluster_queries.items():
+            cluster_df = df[df['keyword'].isin(queries)]
+            if len(cluster_df) > 0:
+                main_query = cluster_df.nlargest(1, 'frequency_world')['keyword'].iloc[0]
+                cluster_names[cid] = main_query
+                
+                # Определяем географию кластера (из первого запроса)
+                cluster_geo = query_geo_dict.get(queries[0])
+                cluster_geos[cid] = cluster_geo
+        
+        df['cluster_name'] = df['semantic_cluster_id'].map(cluster_names)
+        df['cluster_geo_label'] = df['semantic_cluster_id'].map(cluster_geos)
+        
+        # Статистика по географическим кластерам
+        if geo_count > 0:
+            geo_clusters = df[df['cluster_geo_label'].notna()]['semantic_cluster_id'].nunique()
+            no_geo_clusters = df[df['cluster_geo_label'].isna()]['semantic_cluster_id'].nunique()
+            print(f"  ✓ Кластеров с географией: {geo_clusters}")
+            print(f"  ✓ Кластеров без географии: {no_geo_clusters}")
+        
+        return df
+    
+    def get_cluster_stats(self) -> Dict:
+        """Возвращает статистику по кластерам"""
+        if not self.cluster_queries:
+            return {}
+        
+        cluster_sizes = [len(queries) for queries in self.cluster_queries.values()]
+        
+        return {
+            'total_clusters': len(self.cluster_queries),
+            'avg_cluster_size': sum(cluster_sizes) / len(cluster_sizes),
+            'max_cluster_size': max(cluster_sizes),
+            'min_cluster_size': min(cluster_sizes),
+            'singleton_clusters': sum(1 for size in cluster_sizes if size == 1),
+        }
+

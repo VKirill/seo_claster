@@ -1,0 +1,596 @@
+"""
+Brand Learner
+Обучается на группе запросов для определения брендов статистически
+"""
+
+from typing import List, Set, Dict
+from collections import Counter
+import re
+
+try:
+    from natasha import Segmenter, MorphVocab, NewsEmbedding, NewsMorphTagger, Doc
+    from navec import Navec
+    NATASHA_AVAILABLE = True
+    NAVEC_AVAILABLE = True
+except ImportError:
+    NATASHA_AVAILABLE = False
+    NAVEC_AVAILABLE = False
+
+
+class BrandLearner:
+    """
+    Обучается на группе запросов для определения частых брендов.
+    
+    Логика:
+    - Если слово часто встречается капитализированным → вероятно бренд
+    - Если слово появляется в разных контекстах → вероятно бренд
+    - Если слово латиница и встречается часто → точно бренд
+    
+    Example:
+        >>> learner = BrandLearner()
+        >>> queries = [
+        ...     "скуд Болид",
+        ...     "контроллер Болид",
+        ...     "система на базе Болид"
+        ... ]
+        >>> brands = learner.learn_from_queries(queries)
+        >>> print(brands)  # {'Болид'}
+    """
+    
+    def __init__(
+        self, 
+        min_occurrences: int = 3, 
+        capitalization_threshold: float = 0.5,
+        exclude_topic_words: bool = True,
+        topic_threshold: float = 0.5,
+        filter_common_words: bool = True,
+        geo_dicts: dict = None
+    ):
+        """
+        Args:
+            min_occurrences: Минимальное количество встреч слова для анализа
+            capitalization_threshold: Порог капитализации (0.5 = 50% встреч с капсом)
+            exclude_topic_words: Исключать ли слова-темы (встречаются в >50% запросов)
+            topic_threshold: Порог частоты для определения темы (0.5 = в 50%+ запросов)
+            filter_common_words: Фильтровать ли обычные слова (прилагательные, существительные)
+            geo_dicts: Географические словари для фильтрации городов/стран
+        """
+        self.min_occurrences = min_occurrences
+        self.capitalization_threshold = capitalization_threshold
+        self.exclude_topic_words = exclude_topic_words
+        self.topic_threshold = topic_threshold
+        self.filter_common_words = filter_common_words
+        self.geo_dicts = geo_dicts or {}
+        
+        # Инициализация Natasha для фильтрации
+        if NATASHA_AVAILABLE and filter_common_words:
+            self.segmenter = Segmenter()
+            self.morph_vocab = MorphVocab()
+            self.emb = NewsEmbedding()
+            self.morph_tagger = NewsMorphTagger(self.emb)
+            
+            # Инициализация CapitalizationFixer для восстановления капитализации
+            try:
+                from .capitalization_fixer import CapitalizationFixer
+                self.cap_fixer = CapitalizationFixer()
+            except ImportError:
+                self.cap_fixer = None
+            
+            # Получаем словарь частотных слов из navec
+            # Пытаемся загрузить hudlit_12B_500K_300d_100q (500K слов)
+            self.common_words_vocab = set()
+            
+            # Сначала пробуем загрузить hudlit модель (500K слов)
+            hudlit_loaded = False
+            if NAVEC_AVAILABLE:
+                try:
+                    from navec import Navec
+                    # Пытаемся загрузить из стандартного пути
+                    import os
+                    hudlit_path = os.path.expanduser('~/.navec/hudlit_12B_500K_300d_100q.tar')
+                    if os.path.exists(hudlit_path):
+                        navec_hudlit = Navec.load(hudlit_path)
+                        self.common_words_vocab = set(navec_hudlit.vocab.words)
+                        hudlit_loaded = True
+                        print(f"✅ Загружен hudlit словарь: {len(self.common_words_vocab)} слов")
+                except Exception as e:
+                    pass  # Если не получилось - используем NewsEmbedding
+            
+            # Если hudlit не загрузился - используем NewsEmbedding (250K слов)
+            if not hudlit_loaded and hasattr(self.emb, 'vocab') and hasattr(self.emb.vocab, 'words'):
+                self.common_words_vocab = set(self.emb.vocab.words)
+                print(f"ℹ️  Используем NewsEmbedding: {len(self.common_words_vocab)} слов")
+        else:
+            self.segmenter = None
+            self.morph_tagger = None
+            self.common_words_vocab = set()
+            self.cap_fixer = None
+    
+    def learn_from_queries(self, queries: List[str]) -> Set[str]:
+        """
+        Обучается на списке запросов и возвращает найденные бренды.
+        
+        РАБОТАЕТ ДАЖЕ С LOWERCASE ЗАПРОСАМИ!
+        Определяет бренды по:
+        - Частоте появления в специфичных контекстах
+        - Латинским словам (почти всегда бренды)
+        - Необычным словам (не нарицательные существительные)
+        
+        Args:
+            queries: Список поисковых запросов (могут быть с капитализацией или без)
+            
+        Returns:
+            Множество найденных брендов с правильной капитализацией
+        """
+        # Счетчики
+        word_counter = Counter()  # слово (lowercase) → количество встреч
+        capitalized_counter = Counter()  # слово (lowercase) → количество капитализированных встреч
+        word_forms = {}  # слово (lowercase) → {различные формы написания}
+        context_counter = {}  # слово → набор контекстов (соседние слова)
+        
+        # Анализируем все запросы
+        for query in queries:
+            words = query.split()
+            
+            for i, word in enumerate(words):
+                # Пропускаем короткие слова (предлоги, союзы)
+                if len(word) <= 2:
+                    continue
+                
+                word_lower = word.lower()
+                
+                # Считаем общее количество встреч
+                word_counter[word_lower] += 1
+                
+                # Проверяем капитализацию (оригинальную или восстановленную)
+                if word[0].isupper():
+                    capitalized_counter[word_lower] += 1
+                else:
+                    # Для lowercase слов пробуем восстановить капитализацию через CapitalizationFixer
+                    if hasattr(self, 'cap_fixer') and self.cap_fixer and not self._is_latin(word):
+                        fixed_word = self.cap_fixer.fix_capitalization(word)
+                        if fixed_word != word and fixed_word[0].isupper():
+                            # Слово было восстановлено с заглавной - вероятно собственное имя
+                            capitalized_counter[word_lower] += 1
+                
+                # Запоминаем различные формы написания
+                if word_lower not in word_forms:
+                    word_forms[word_lower] = set()
+                word_forms[word_lower].add(word)
+                
+                # Запоминаем контексты (соседние слова)
+                if word_lower not in context_counter:
+                    context_counter[word_lower] = set()
+                
+                # Добавляем предыдущее и следующее слово как контекст
+                if i > 0:
+                    context_counter[word_lower].add(words[i-1].lower())
+                if i < len(words) - 1:
+                    context_counter[word_lower].add(words[i+1].lower())
+        
+        # Определяем СЛОВА-ТЕМЫ (встречаются слишком часто - это основа группы)
+        total_queries = len(queries)
+        topic_words = set()
+        
+        if self.exclude_topic_words:
+            for word_lower, count in word_counter.items():
+                frequency_ratio = count / total_queries
+                # Если слово встречается в >50% запросов - это тема группы, не бренд
+                if frequency_ratio >= self.topic_threshold:
+                    topic_words.add(word_lower)
+        
+        # Определяем бренды
+        learned_brands = set()
+        
+        for word_lower, total_count in word_counter.items():
+            # ИСКЛЮЧАЕМ слова-темы (основа группы запросов)
+            if word_lower in topic_words:
+                continue
+            
+            # Критерии бренда (даже без капитализации):
+            # 1. Латиница (почти всегда бренд) - БЕЗ min_occurrences!
+            # 2. Акроним (короткое слово с малым количеством гласных)
+            # 3. Частое слово с разнообразными контекстами (не нарицательное)
+            
+            is_latin = self._is_latin(word_lower)
+            is_acronym = self._is_likely_acronym_by_structure(word_lower)
+            has_diverse_contexts = len(context_counter.get(word_lower, set())) >= 3
+            is_potential_brand = self._looks_like_brand_name(word_lower, has_diverse_contexts, total_count)
+            
+            # Латиница - почти всегда бренд (даже при 1 встрече!)
+            # НО НЕ чистые цифры!
+            if is_latin and len(word_lower) >= 3:
+                # Проверяем что это не только цифры
+                if not word_lower.isdigit():
+                    best_form = self._generate_brand_form(word_lower, word_forms.get(word_lower, {word_lower}))
+                    learned_brands.add(best_form)
+            
+            # Акронимы - СТРОГАЯ проверка!
+            elif is_acronym and total_count >= self.min_occurrences:
+                # Для кириллицы: дополнительно проверяем, что это НЕ обычное слово
+                if not self._is_latin(word_lower):
+                    # 1. Проверяем через navec - если слово есть в словаре, это обычное слово
+                    if self.common_words_vocab and word_lower in self.common_words_vocab:
+                        continue  # "дверь", "вход", "день" - обычные слова
+                    
+                    # 2. Проверяем через морфологию - получаем лемму и проверяем её
+                    if self.morph_vocab:
+                        parsed = self.morph_vocab.parse(word_lower)
+                        if parsed:
+                            lemma = parsed[0].normal_form
+                            if self.common_words_vocab and lemma in self.common_words_vocab:
+                                continue  # Лемма в словаре - обычное слово
+                            
+                            # ДОПОЛНИТЕЛЬНО: проверяем, не является ли это склонением ОСНОВНОГО слова
+                            # Например: "скуда", "скуду", "скуды" → лемма "скуд" (основа группы)
+                            if lemma in topic_words:
+                                continue  # Это склонение основного слова группы (темы)
+                    
+                    # 3. Акронимы должны иметь мало форм (≤3: им., род., вин.)
+                    num_forms = len(word_forms.get(word_lower, set()))
+                    if num_forms > 3:
+                        # Слишком много форм - это обычное слово в капсе
+                        continue
+                    
+                    # 4. Для кириллических акронимов требуем МИНИМУМ 5 встреч
+                    # Технические аббревиатуры (ОКДП, ОКВЭД, ИСПДН) встречаются редко
+                    # Реальные бренды (С2000, Е300) встречаются чаще
+                    if total_count < 5:
+                        continue  # Слишком редкий акроним - вероятно техническая аббревиатура
+                
+                best_form = self._generate_brand_form(word_lower, word_forms.get(word_lower, {word_lower}))
+                learned_brands.add(best_form)
+            
+            # Кириллица - нужны контексты, частота И капитализация
+            elif has_diverse_contexts and is_potential_brand and total_count >= 5:
+                # Для кириллицы требуем хотя бы ОДНУ капитализированную форму!
+                # Это отсеет "биометрия", "видеодомофон" и другие общие слова
+                cap_count = capitalized_counter.get(word_lower, 0)
+                
+                if not self._is_latin(word_lower):
+                    if cap_count == 0:
+                        # Кириллица БЕЗ капитализации - точно НЕ бренд
+                        continue
+                    
+                    # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА для кириллических брендов:
+                    # 1. Если слово в navec - скорее обычное слово
+                    if self.common_words_vocab and word_lower in self.common_words_vocab:
+                        # Даже с капитализацией, если слово в словаре - это обычное слово
+                        continue
+                    
+                    # 2. Проверяем через морфологию - лемма должна быть в navec ИЛИ это склонение темы
+                    if self.morph_vocab:
+                        parsed = self.morph_vocab.parse(word_lower)
+                        if parsed:
+                            lemma = parsed[0].normal_form
+                            
+                            # Проверяем, не является ли это склонением ОСНОВНОГО слова группы
+                            # "скуда", "скуду", "скуды" → лемма "скуд" (тема группы)
+                            if lemma in topic_words:
+                                continue  # Это склонение темы - НЕ бренд
+                            
+                            if self.common_words_vocab and lemma in self.common_words_vocab:
+                                # Лемма в словаре - обычное слово
+                                # "биометрией" → "биометрия" (в словаре)
+                                # "видеодомофоном" → "видеодомофон" (в словаре)
+                                continue
+                    
+                    # 3. Если слово имеет МНОГО разных форм в запросах - это обычное слово
+                    # Бренды обычно имеют 1-3 формы написания
+                    # Обычные слова - больше вариаций
+                    num_forms = len(word_forms.get(word_lower, set()))
+                    if num_forms > 4:
+                        # "Скуда", "Скуду", "Скуды", "Скудом", "Скуде" - много форм
+                        continue
+                
+                # Часто встречается в разных контекстах - вероятно бренд
+                # Например: "болид" встречается в "купить болид", "система болид", "контроллер болид"
+                best_form = self._generate_brand_form(word_lower, word_forms.get(word_lower, {word_lower}))
+                learned_brands.add(best_form)
+        
+        return learned_brands
+    
+    def _is_latin(self, word: str) -> bool:
+        """Проверяет, является ли слово латиницей"""
+        return bool(re.match(r'^[a-z0-9\-]+$', word, re.IGNORECASE))
+    
+    def _is_likely_acronym_by_structure(self, word_lower: str) -> bool:
+        """
+        Определяет акроним ТОЛЬКО по структуре слова (без форм написания).
+        
+        Для lowercase запросов, где нет информации о капитализации.
+        """
+        if len(word_lower) < 2 or len(word_lower) > 5:
+            return False
+        
+        # Считаем гласные
+        vowels = set('аеёиоуыэюя')
+        vowel_count = sum(1 for char in word_lower if char in vowels)
+        
+        # Если гласных <= 1 и слово короткое - вероятно акроним
+        return vowel_count <= 1
+    
+    def _is_likely_acronym(self, word_lower: str, forms: Set[str]) -> bool:
+        """
+        Определяет, является ли слово акронимом.
+        
+        Акроним если:
+        - Короткое (2-5 символов)
+        - Часто пишется UPPERCASE
+        - Мало гласных
+        """
+        if len(word_lower) < 2 or len(word_lower) > 5:
+            return False
+        
+        # Считаем сколько раз слово было полностью в UPPERCASE
+        uppercase_count = sum(1 for form in forms if form.isupper())
+        total_count = len(forms)
+        
+        if uppercase_count / total_count >= 0.5:
+            # Проверяем количество гласных
+            vowels = set('аеёиоуыэюя')
+            vowel_count = sum(1 for char in word_lower if char in vowels)
+            
+            # Если гласных мало - акроним
+            return vowel_count <= 1
+        
+        return False
+    
+    def _is_common_word_by_pos(self, word: str) -> bool:
+        """
+        Проверяет через Natasha, является ли слово обычным (НЕ брендом).
+        
+        ЧИСТО ЧЕРЕЗ NATASHA - БЕЗ ХАРДКОДА!
+        
+        Обычные слова:
+        - ADJ (прилагательные): "исполнительная", "автономная"
+        - VERB (глаголы): "купить", "скачать", "установить"
+        - PRON (местоимения): "что", "какая", "который"
+        - ADVB (наречия): "где", "как", "когда"
+        - NOUN (существительные):
+          * С продуктивными суффиксами: -ция, -ние, -ость, -тель
+          * С падежными окончаниями: -ия, -ей, -ам, -ах
+          * Короткие (≤4 букв): "цена", "код", "ключ"
+        
+        Потенциальные бренды:
+        - PROPN (собственные существительные)
+        - NOUN без продуктивных суффиксов, длинные (≥5 букв)
+        - Слова с необычной морфологией
+        """
+        if not self.morph_tagger or not self.segmenter:
+            return False  # Без Natasha не фильтруем
+        
+        try:
+            # Анализируем слово через Natasha
+            doc = Doc(word)
+            doc.segment(self.segmenter)
+            doc.tag_morph(self.morph_tagger)
+            
+            if not doc.tokens:
+                return False
+            
+            # Берем первый токен
+            token = doc.tokens[0]
+            pos = token.pos
+            feats = token.feats if hasattr(token, 'feats') and token.feats else {}
+            
+            # 1. Явно НЕ бренды (функциональные части речи)
+            if pos in ('ADJ', 'VERB', 'PRON', 'ADVB', 'ADP', 'CONJ', 'PART', 'NUM'):
+                return True  # Обычное слово
+            
+            # 2. PROPN (собственные существительные) - ВЕРОЯТНО БРЕНД или АББРЕВИАТУРА
+            if pos == 'PROPN':
+                word_lower = word.lower()
+                
+                # Проверяем через geo-словари (если есть)
+                if self.geo_dicts:
+                    for geo_type, geo_list in self.geo_dicts.items():
+                        if any(word_lower == geo.lower() for geo in geo_list):
+                            return True  # География из словаря - не бренд
+                
+                # Проверяем на географию и аббревиатуры через морфологию
+                if isinstance(feats, dict):
+                    animacy = feats.get('Animacy', '')
+                    
+                    # КЛЮЧЕВОЕ РАЗЛИЧИЕ: Бренды (компании) = Anim, Аббревиатуры = Inan
+                    if animacy == 'Inan':  # Неодушевленное
+                        # 1. Типичные географические окончания
+                        geo_endings = ('ск', 'град', 'бург', 'полис', 'стан', 'ия', 'ань', 'инск')
+                        if any(word_lower.endswith(end) for end in geo_endings):
+                            return True  # География - не бренд
+                        
+                        # 2. Если это PROPN + Inan + капс (все буквы заглавные)
+                        # → вероятно техническая аббревиатура (ОКПД, ОКВЭД, ИСПДН, ФСТЭК)
+                        # НЕ бренд компании!
+                        if word.isupper() and len(word) >= 3:
+                            return True  # Техническая аббревиатура - не бренд
+                
+                return False  # PROPN Anim (одушевленное) - вероятно бренд компании!
+            
+            # 3. NOUN - анализируем через морфологию
+            if pos == 'NOUN':
+                word_lower = word.lower()
+                
+                # 3.1. ПРОВЕРКА ЧЕРЕЗ NAVEC (словарь частотных слов)
+                # Если слово есть в частых словах И это не акроним → это обычное слово!
+                if self.common_words_vocab and word_lower in self.common_words_vocab:
+                    # Исключение для акронимов и известных брендов (все заглавные)
+                    if not (word.isupper() and len(word) >= 2):
+                        return True  # Частое слово из корпуса = НЕ бренд
+                
+                # 3.2. Проверяем через морфологию - получаем начальную форму
+                # Это поможет определить, что "лифта" → "лифт", "курсы" → "курс"
+                if self.morph_vocab:
+                    parsed = self.morph_vocab.parse(word_lower)
+                    if parsed:
+                        # Берем первый разбор
+                        lemma = parsed[0].normal_form
+                        
+                        # Проверяем лемму в navec
+                        if self.common_words_vocab and lemma in self.common_words_vocab:
+                            # Лемма есть в частых словах - это обычное слово
+                            if not (word.isupper() and len(word) >= 2):
+                                return True
+                
+                # НЕ фильтруем по длине! Бренды могут быть любой длины:
+                # "VV", "HP", "LG" (2 буквы) или "Болид", "Рубеж" (5-6 букв)
+                
+                # 3.1.6. НЕ фильтруем слова 5-7 букв автоматически!
+                # "Болид", "Рубеж", "Сигур", "Борей" - это реальные бренды
+                # Полагаемся на проверку продуктивных суффиксов ниже
+                
+                # 3.2. Проверяем продуктивные суффиксы через окончания
+                # Это признак нарицательного существительного
+                productive_suffixes = [
+                    'ция', 'сия',  # документа-ция, комис-сия
+                    'ние', 'ение', 'ание',  # использова-ние, обеспече-ние
+                    'ство', 'ость',  # хозяй-ство, возможн-ость
+                    'тель', 'итель', 'атель',  # читатель, строитель
+                    'изация', 'ация',  # оптимиза-ция, классифика-ция
+                    'ование', 'ирование',  # проектирова-ние
+                    'овка', 'ировка',  # установ-ка, блокиров-ка
+                    'ность',  # безопас-ность
+                ]
+                
+                # Проверяем окончания
+                for suffix in productive_suffixes:
+                    if word_lower.endswith(suffix):
+                        return True  # Нарицательное существительное
+                
+                # 3.3. Проверяем падежные формы (Род. падеж множ. числа и т.д.)
+                # Если слово в падежной форме множ. числа - вероятно не бренд
+                if isinstance(feats, dict):
+                    case = feats.get('Case', '')
+                    number = feats.get('Number', '')
+                    
+                    # Слова в падежах множ. числа (кроме им. падежа) - обычно не бренды
+                    if number == 'Plur' and case in ('Gen', 'Dat', 'Acc', 'Ins', 'Loc'):
+                        return True  # "карт", "дверей", "систем"
+                
+                # 3.4. Длинные составные слова (≥10 букв) - вероятно НЕ бренды
+                # "биометрия" (9), "алкотестер" (10), "антипаника" (10), "видеодомофон" (12)
+                # Бренды обычно короче: "Болид" (5), "Рубеж" (5), "Тантос" (6), "Смартек" (7), "Hikvision" (9)
+                if len(word_lower) >= 10:
+                    return True  # Длинное составное слово - скорее техническийтермин, не бренд
+                
+                # 3.5. Если прошли все проверки - возможно бренд
+                # Средней длины слово (5-11 букв) без продуктивных суффиксов
+                if len(word_lower) >= 5:
+                    return False  # Вероятно бренд: "Болид", "Рубеж", "Сигур", "Accordtec"
+                
+                # По умолчанию для NOUN - обычное слово
+                return True
+            
+            # 4. Остальные POS - считаем обычными словами
+            return True
+            
+        except Exception:
+            return False  # В случае ошибки не фильтруем
+    
+    def _looks_like_brand_name(self, word: str, has_diverse_contexts: bool = False, frequency: int = 0) -> bool:
+        """
+        Проверяет, похоже ли слово на название бренда.
+        
+        ЧИСТО ЧЕРЕЗ NATASHA - БЕЗ ХАРДКОДА!
+        
+        Логика:
+        1. Латиница (≥3 букв) - почти всегда бренд
+        2. Кириллица - проверяем через Natasha POS и морфологию
+        3. PROPN (собственные сущ.) = бренд (кроме географии)
+        4. NOUN длинные (≥7 букв) без суффиксов + разные контексты = бренд
+        """
+        if len(word) < 3:
+            return False
+        
+        # Для кириллицы проверяем через Natasha
+        if re.search(r'[А-Яа-яЁё]', word):
+            if self.filter_common_words:
+                # Проверяем через Natasha - это обычное слово?
+                is_common = self._is_common_word_by_pos(word)
+                return not is_common  # Следуем результату Natasha
+            else:
+                return True  # Фильтрация отключена - считаем брендом
+        
+        # Латиница - почти всегда бренд (кроме очень коротких)
+        return True
+    
+    def _generate_brand_form(self, word_lower: str, forms: Set[str]) -> str:
+        """
+        Генерирует правильную форму написания бренда.
+        
+        Для lowercase запросов, где нет капитализированных форм.
+        """
+        # Если есть капитализированные формы - используем их
+        capitalized = [f for f in forms if f[0].isupper()]
+        if capitalized:
+            return self._get_most_common_capitalized_form(forms)
+        
+        # Иначе генерируем:
+        # - Акронимы → UPPERCASE
+        # - Латиница → Capitalize
+        # - Кириллица → Capitalize
+        
+        if self._is_likely_acronym_by_structure(word_lower):
+            return word_lower.upper()
+        else:
+            return word_lower.capitalize()
+    
+    def _get_most_common_capitalized_form(self, forms: Set[str]) -> str:
+        """
+        Возвращает самую частую капитализированную форму.
+        
+        Приоритет:
+        1. Первая буква капитализирована (Samsung, Болид)
+        2. Все буквы капитализированы (СКУД, ВТБ)
+        3. Fallback на любую форму
+        """
+        capitalized_forms = [f for f in forms if f[0].isupper()]
+        
+        if not capitalized_forms:
+            return None
+        
+        # Если есть форма с капитализацией только первой буквы - приоритет ей
+        title_case = [f for f in capitalized_forms if f[0].isupper() and not f.isupper()]
+        if title_case:
+            return sorted(title_case)[0]  # Самая "чистая" форма
+        
+        # Иначе берем UPPERCASE (акронимы)
+        uppercase_forms = [f for f in capitalized_forms if f.isupper()]
+        if uppercase_forms:
+            return sorted(uppercase_forms)[0]
+        
+        # Fallback
+        return sorted(capitalized_forms)[0]
+    
+    def get_statistics(self, queries: List[str]) -> Dict[str, any]:
+        """
+        Возвращает статистику по брендам в запросах.
+        
+        Args:
+            queries: Список запросов
+            
+        Returns:
+            Словарь со статистикой:
+            {
+                'total_queries': 100,
+                'learned_brands': {'Болид', 'Samsung', 'СКУД'},
+                'brand_frequencies': {'болид': 25, 'samsung': 10, ...}
+            }
+        """
+        brands = self.learn_from_queries(queries)
+        
+        # Считаем частоту брендов
+        brand_frequencies = Counter()
+        for query in queries:
+            query_lower = query.lower()
+            for brand in brands:
+                if brand.lower() in query_lower:
+                    brand_frequencies[brand.lower()] += 1
+        
+        return {
+            'total_queries': len(queries),
+            'learned_brands': brands,
+            'brands_count': len(brands),
+            'brand_frequencies': dict(brand_frequencies.most_common())
+        }
+

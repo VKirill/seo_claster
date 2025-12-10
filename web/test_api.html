@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Тест API</title>
+  <style>
+    body {
+      font-family: monospace;
+      padding: 20px;
+      background: #1e1e1e;
+      color: #00ff00;
+    }
+
+    .test {
+      margin: 10px 0;
+      padding: 10px;
+      background: #2d2d2d;
+    }
+
+    .success {
+      color: #00ff00;
+    }
+
+    .error {
+      color: #ff0000;
+    }
+
+    button {
+      padding: 10px 20px;
+      font-size: 16px;
+      margin: 10px 5px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>🔍 Тест API - Диагностика</h1>
+
+  <button onclick="testAPI()">▶️ Запустить тест</button>
+  <button onclick="location.reload()">🔄 Обновить</button>
+  <button onclick="openConsole()">📋 Открыть консоль (F12)</button>
+
+  <div id="results"></div>
+
+  <script>
+    function log(message, type = 'info') {
+      const div = document.createElement('div');
+      div.className = `test ${type}`;
+      div.innerHTML = message;
+      document.getElementById('results').appendChild(div);
+      console.log(message);
+    }
+
+    function openConsole() {
+      alert('Нажмите F12 для открытия консоли разработчика');
+    }
+
+    async function testAPI() {
+      document.getElementById('results').innerHTML = '';
+
+      log('═══════════════════════════════════════════════', 'info');
+      log('🚀 НАЧАЛО ТЕСТИРОВАНИЯ', 'info');
+      log('═══════════════════════════════════════════════', 'info');
+      log('');
+
+      // Тест 1: Текущий URL
+      log(`📍 Текущий URL: ${window.location.href}`, 'info');
+      log(`📍 Протокол: ${window.location.protocol}`, 'info');
+      log('');
+
+      if (window.location.protocol === 'file:') {
+        log('❌ ОШИБКА: Открыто через file:///', 'error');
+        log('   Это не работает! Нужен HTTP сервер', 'error');
+        log('   Запустите start_manager.bat', 'error');
+        log('');
+        return;
+      }
+
+      // Тест 2: Проверка доступности API файла
+      log('[1/3] Проверка доступности api.php...', 'info');
+      try {
+        const response = await fetch('api.php');
+        log(`✅ api.php доступен (HTTP ${response.status})`, 'success');
+        log(`   Content-Type: ${response.headers.get('content-type')}`, 'info');
+      } catch (error) {
+        log(`❌ api.php недоступен: ${error.message}`, 'error');
+        log('   Убедитесь, что PHP сервер запущен', 'error');
+        return;
+      }
+      log('');
+
+      // Тест 3: Тест API endpoint - cache stats
+      log('[2/3] Тест API: get_cache_stats...', 'info');
+      try {
+        const response = await fetch('api.php?action=get_cache_stats');
+
+        log(`   HTTP статус: ${response.status} ${response.statusText}`, 'info');
+        log(`   Content-Type: ${response.headers.get('content-type')}`, 'info');
+
+        if (!response.ok) {
+          const text = await response.text();
+          log(`❌ Ошибка HTTP ${response.status}`, 'error');
+          log(`   Ответ: ${text.substring(0, 200)}`, 'error');
+          return;
+        }
+
+        const data = await response.json();
+        log(`✅ API работает!`, 'success');
+        log(`   Данные: ${JSON.stringify(data, null, 2)}`, 'info');
+      } catch (error) {
+        log(`❌ Ошибка при запросе: ${error.message}`, 'error');
+        return;
+      }
+      log('');
+
+      // Тест 4: Тест API endpoint - list groups
+      log('[3/3] Тест API: list_groups...', 'info');
+      try {
+        const response = await fetch('api.php?action=list_groups');
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const groups = await response.json();
+        log(`✅ Список групп загружен!`, 'success');
+        log(`   Найдено групп: ${groups.length}`, 'info');
+
+        if (groups.length > 0) {
+          groups.forEach(g => {
+            log(`   📁 ${g.name} (${g.queries} запросов)`, 'info');
+          });
+        } else {
+          log(`   ℹ️  Групп пока нет (загрузите CSV)`, 'info');
+        }
+      } catch (error) {
+        log(`❌ Ошибка: ${error.message}`, 'error');
+        return;
+      }
+      log('');
+
+      log('═══════════════════════════════════════════════', 'success');
+      log('✅ ВСЕ ТЕСТЫ ПРОЙДЕНЫ!', 'success');
+      log('═══════════════════════════════════════════════', 'success');
+      log('');
+      log('Интерфейс должен работать: index.html', 'success');
+    }
+
+    // Автозапуск при загрузке
+    window.addEventListener('load', () => {
+      setTimeout(testAPI, 500);
+    });
+  </script>
+</body>
+
+</html>

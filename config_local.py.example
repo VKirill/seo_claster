@@ -1,0 +1,56 @@
+"""
+Локальная конфигурация (НЕ КОМИТИТЬ В GIT!)
+Скопируйте этот файл в config_local.py и заполните своими значениями
+"""
+
+# xmlstock API ключ (формат: user:key)
+XMLSTOCK_API_KEY = "your_user:your_api_key"
+
+# Пример:
+# XMLSTOCK_API_KEY = "b3c2f28ec0a90b44e486af55c2f6b270"
+
+# DeepSeek API ключ (для построения иерархии сайта)
+DEEPSEEK_API_KEY = ""
+
+# Включить построение иерархии (требует SERP данные и DeepSeek API)
+ENABLE_HIERARCHY_ANALYSIS = False
+
+# Yandex Direct API интеграция (для получения данных о трафике и CPC)
+YANDEX_DIRECT_ENABLED = False  # Включить интеграцию с Yandex Direct
+YANDEX_DIRECT_TOKEN = ""  # OAuth токен (получить автоматически: python get_yandex_direct_token.py)
+YANDEX_DIRECT_USE_SANDBOX = False  # True для тестов, False для production
+
+# Регион для прогнозов Direct (можно быстро менять для разных регионов)
+YANDEX_DIRECT_GEO_ID = 213
+# 213 = Москва
+# 1 = Москва и Московская область
+# 2 = Санкт-Петербург
+# 225 = Россия
+# 187 = Украина
+# 149 = Беларусь
+# 159 = Казахстан
+
+# Данные приложения (для автоматического получения токена)
+YANDEX_DIRECT_CLIENT_ID = ""  # ID вашего приложения
+YANDEX_DIRECT_CLIENT_SECRET = ""  # Пароль приложения
+
+# Для получения токена запустите:
+# python get_yandex_direct_token.py
+# Токен автоматически сохранится в этот файл
+
+# Опциональные оверрайды конфигов (оставьте {} если не нужно)
+CLUSTERING_CONFIG_OVERRIDES = {}
+# Пример: Изменить максимальный размер кластера при пост-обработке
+# CLUSTERING_CONFIG_OVERRIDES = {
+#     "postprocess": {
+#         "max_cluster_size": 20,  # Дефолт: 12 запросов
+#         "threshold_step": 1,     # Шаг повышения порога при делении
+#     }
+# }
+
+SERP_CONFIG_OVERRIDES = {}
+LSI_CONFIG_OVERRIDES = {}
+EXCEL_CONFIG_OVERRIDES = {}
+HIERARCHY_CONFIG_OVERRIDES = {}
+RUN_CONFIG_OVERRIDES = {}
+
