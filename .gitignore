@@ -72,3 +72,6 @@ data/temp/*
 !data/databases/.gitkeep
 !data/temp/.gitkeep
 
+# CSV файлы из папки semantika
+semantika/*.csv
+
