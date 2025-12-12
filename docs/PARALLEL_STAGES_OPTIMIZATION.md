@@ -308,3 +308,6 @@ Python Global Interpreter Lock ограничивает параллелизм C
 **Автор:** Система оптимизации pipeline
 
 
+
+
+

@@ -173,6 +173,27 @@ class MasterQueryDatabase:
                     if keyword and keyword in existing_df.index:
                         existing_row = existing_df.loc[keyword]
                         
+                        # Сохраняем базовые данные (частоты) из БД если их нет в DataFrame
+                        basic_fields = [
+                            'frequency_world', 'frequency_exact'
+                        ]
+                        
+                        frequencies_restored = 0
+                        for field in basic_fields:
+                            # Если поле есть в существующих данных и отсутствует или пустое в DataFrame
+                            if field in existing_df.columns:
+                                existing_val = existing_row.get(field)
+                                df_val = row.get(field)
+                                
+                                # Сохраняем существующее значение если в DataFrame его нет или оно пустое/нулевое
+                                if pd.notna(existing_val) and existing_val != 0 and (pd.isna(df_val) or df_val == '' or df_val == 0):
+                                    df_copy.at[idx, field] = existing_val
+                                    frequencies_restored += 1
+                        
+                        # Диагностика: выводим предупреждение если частоты были восстановлены
+                        if frequencies_restored > 0 and idx == df_copy.index[0]:  # Только для первой строки чтобы не спамить
+                            print(f"  ℹ️  Восстановление частот из БД для существующих запросов...")
+                        
                         # Сохраняем SERP данные из БД если их нет в DataFrame
                         serp_fields = [
                             'serp_req_id', 'serp_status', 'serp_error_message',

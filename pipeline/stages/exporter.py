@@ -9,8 +9,9 @@ from seo_analyzer.export.graph_exporter import GraphExporter
 from seo_analyzer.export.excel_exporter import ExcelExporter
 from seo_analyzer.core.config import EXCEL_CONFIG, HIERARCHY_CONFIG, PROJECT_ROOT
 # ОТКЛЮЧЕНО: from seo_analyzer.analysis import HierarchyBuilder
-from seo_analyzer.analysis.cluster_relationship_analyzer import ClusterRelationshipAnalyzer
-from seo_analyzer.analysis.cluster_relationship_applier import apply_cluster_relationships
+# ОТКЛЮЧЕНО: Анализ связей между кластерами
+# from seo_analyzer.analysis.cluster_relationship_analyzer import ClusterRelationshipAnalyzer
+# from seo_analyzer.analysis.cluster_relationship_applier import apply_cluster_relationships
 
 
 def get_deepseek_api_key():
@@ -90,22 +91,22 @@ async def export_results_stage(args, analyzer):
         print()
         return
     
-    # Анализируем связи между кластерами для перелинковки
+    # ОТКЛЮЧЕНО: Анализ связей между кластерами для перелинковки
     relationships = {}
-    if 'semantic_cluster_id' in analyzer.df.columns:
-        relationship_analyzer = ClusterRelationshipAnalyzer(
-            min_url_overlap=3,      # Минимум 3 общих URL
-            min_word_overlap=2,     # Минимум 2 общих ключевых слова
-            max_related_clusters=5  # Максимум 5 связанных кластеров
-        )
-        relationships = relationship_analyzer.analyze_relationships(analyzer.df)
-        
-        # Добавляем колонку related_clusters в DataFrame
-        analyzer.df = apply_cluster_relationships(
-            analyzer.df,
-            relationships,
-            cluster_column='semantic_cluster_id'
-        )
+    # if 'semantic_cluster_id' in analyzer.df.columns:
+    #     relationship_analyzer = ClusterRelationshipAnalyzer(
+    #         min_url_overlap=3,      # Минимум 3 общих URL
+    #         min_word_overlap=2,     # Минимум 2 общих ключевых слова
+    #         max_related_clusters=5  # Максимум 5 связанных кластеров
+    #     )
+    #     relationships = relationship_analyzer.analyze_relationships(analyzer.df)
+    #     
+    #     # Добавляем колонку related_clusters в DataFrame
+    #     analyzer.df = apply_cluster_relationships(
+    #         analyzer.df,
+    #         relationships,
+    #         cluster_column='semantic_cluster_id'
+    #     )
     
     # Инициализируем экспортеры (передаём relationships в JSON экспортер)
     analyzer.csv_exporter = CSVExporter()

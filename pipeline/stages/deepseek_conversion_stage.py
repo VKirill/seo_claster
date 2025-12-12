@@ -90,3 +90,6 @@ def print_business_parameters(avg_check: float, conversion_rate: float,
     print(f"   🎯 Доля рынка: {market_share:.2f}%")
 
 
+
+
+

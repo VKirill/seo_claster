@@ -49,3 +49,6 @@ def get_direct_columns() -> list:
     return list(DIRECT_COLUMNS.keys())
 
 
+
+
+

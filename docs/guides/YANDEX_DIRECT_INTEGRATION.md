@@ -237,3 +237,6 @@ kei_direct_quality_score(df)
 - [Метод GetForecast](https://yandex.ru/dev/direct/doc/dg-v4/reference/GetForecast.html)
 
 
+
+
+

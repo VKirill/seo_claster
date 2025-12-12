@@ -230,3 +230,6 @@ def create_url_slug(text: str, case: str = 'nomn') -> str:
 
 
 
+
+
+

@@ -252,3 +252,6 @@ def get_group_prefix(analyzer) -> str:
 - `docs/ASYNC_GROUPS_AND_TOP20.md` - Параллельная обработка групп
 
 
+
+
+

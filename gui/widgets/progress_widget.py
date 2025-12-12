@@ -44,3 +44,6 @@ class ProgressWidget(QWidget):
         self.status_label.setText("Готово")
 
 
+
+
+

@@ -94,3 +94,6 @@ def print_metrics_calculated(market_share: float, conversion_rate: float, margin
     print(f"  ✓ Эффективность бюджета")
 
 
+
+
+

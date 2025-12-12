@@ -323,3 +323,6 @@ AsyncBatchSERPClient.process_queries_batch()
 **Готово! Batch Async Mode работает из коробки.** 🎉
 
 
+
+
+

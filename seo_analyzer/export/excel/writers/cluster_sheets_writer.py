@@ -6,7 +6,7 @@ import pandas as pd
 from typing import Dict, Tuple, Set
 from pathlib import Path
 
-from ...core.lemmatizer import lemmatize_phrase
+from seo_analyzer.core.lemmatizer import lemmatize_phrase
 from ..utils.column_selector import select_columns_for_export
 from ..utils.column_translator import get_column_translation
 from ..sheet_formatter import set_column_widths, add_conditional_formatting, apply_number_formats

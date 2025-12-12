@@ -497,3 +497,6 @@ python recover_serp_requests.py --group <название_группы> --recove
 Batch Async Mode включён по умолчанию и работает автоматически.
 
 
+
+
+

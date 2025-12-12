@@ -59,3 +59,6 @@ class FilterWidget(QWidget):
         self._emit_filters()
 
 
+
+
+

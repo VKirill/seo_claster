@@ -4,12 +4,51 @@
 
 import sqlite3
 from pathlib import Path
+from typing import Union
 
 from ..master_query_schema import (
     MASTER_QUERY_TABLE_SCHEMA,
     MASTER_QUERY_INDEXES,
     MASTER_EXPORT_VIEW
 )
+
+
+def apply_sqlite_optimizations(cursor: sqlite3.Cursor):
+    """
+    Применяет PRAGMA оптимизации для ускорения работы SQLite
+    
+    Используется при каждом подключении к БД для максимальной производительности.
+    Особенно важно для операций чтения (проверка кэша).
+    
+    Args:
+        cursor: Курсор SQLite
+    """
+    # WAL режим - параллельные чтения во время записи
+    cursor.execute("PRAGMA journal_mode = WAL")
+    
+    # Баланс скорости/безопасности
+    cursor.execute("PRAGMA synchronous = NORMAL")
+    
+    # Увеличенный кэш - больше данных в RAM = быстрее чтение
+    cursor.execute("PRAGMA cache_size = -2048000")  # 2GB (было 256MB)
+    
+    # Temp таблицы в памяти
+    cursor.execute("PRAGMA temp_store = MEMORY")
+    
+    # Memory-mapped I/O - очень быстро для чтения больших БД
+    cursor.execute("PRAGMA mmap_size = 2147483648")  # 2GB (было 256MB)
+    
+    # Таймаут для параллельных запросов
+    cursor.execute("PRAGMA busy_timeout = 30000")  # 30 секунд
+    
+    # Автоочистка
+    cursor.execute("PRAGMA auto_vacuum = INCREMENTAL")
+    
+    # Foreign keys
+    cursor.execute("PRAGMA foreign_keys = ON")
+    
+    # Автооптимизация запросов
+    cursor.execute("PRAGMA optimize")
 
 
 class DatabaseInitializer:
@@ -30,16 +69,17 @@ class DatabaseInitializer:
         cursor = conn.cursor()
         
         # PRAGMA оптимизации (аналог PostgreSQL настроек)
-        cursor.execute("PRAGMA journal_mode = WAL")
-        cursor.execute("PRAGMA synchronous = NORMAL")
-        cursor.execute("PRAGMA cache_size = -64000")  # 64MB
-        cursor.execute("PRAGMA temp_store = MEMORY")
-        cursor.execute("PRAGMA page_size = 32768")
-        cursor.execute("PRAGMA auto_vacuum = INCREMENTAL")
-        cursor.execute("PRAGMA foreign_keys = ON")
-        cursor.execute("PRAGMA optimize")
+        apply_sqlite_optimizations(cursor)
         
-        print("✓ SQLite оптимизации применены (WAL, cache 64MB, page 32KB)")
+        # Page size работает только при создании новой БД
+        cursor.execute("PRAGMA page_size = 32768")  # 32KB
+        
+        # Выводим сообщения только при первом создании БД (проверяем существование таблиц)
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='master_queries'")
+        is_new_db = cursor.fetchone() is None
+        
+        if is_new_db:
+            print("✓ SQLite оптимизации применены (WAL, cache 2GB, page 32KB, mmap 2GB)")
         
         # Создаём таблицу групп
         cursor.execute('''
@@ -69,5 +109,7 @@ class DatabaseInitializer:
         conn.commit()
         conn.close()
         
-        print("✓ Master Query Database инициализирована")
+        # Выводим сообщение только при первом создании БД
+        if is_new_db:
+            print("✓ Master Query Database инициализирована")
 

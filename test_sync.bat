@@ -4,3 +4,6 @@ python main.py видеонаблюдение
 pause
 
 
+
+
+

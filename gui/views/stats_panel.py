@@ -49,3 +49,6 @@ class StatsPanel(QWidget):
         self.stats_label.setText("\n".join(lines))
 
 
+
+
+

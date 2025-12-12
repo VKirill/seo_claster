@@ -269,15 +269,45 @@ def normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
         result_df['keyword'] = df[detected_cols['keyword']].astype(str)
     
     if 'frequency_world' in detected_cols:
+        # Обрабатываем частоты: удаляем пробелы и другие разделители тысяч из чисел
+        # Например: "3 000" -> "3000", "3,000" -> "3000", "3.000" -> "3000"
+        # ВАЖНО: обрабатываем только колонку частот, не keyword!
+        freq_world_col = df[detected_cols['frequency_world']]
+        
+        # Проверяем тип данных исходной колонки
+        if freq_world_col.dtype == 'object':
+            # Если это строки, преобразуем и удаляем разделители тысяч
+            freq_world_series = freq_world_col.astype(str)
+            # Удаляем пробелы, запятые и точки (разделители тысяч)
+            freq_world_series = freq_world_series.str.replace(r'[\s,\.]', '', regex=True)
+        else:
+            # Если уже число - используем как есть
+            freq_world_series = freq_world_col
+        
         result_df['frequency_world'] = pd.to_numeric(
-            df[detected_cols['frequency_world']], errors='coerce'
+            freq_world_series, errors='coerce'
         ).fillna(0).astype(int)
     else:
         result_df['frequency_world'] = 0
     
     if 'frequency_exact' in detected_cols:
+        # Обрабатываем частоты: удаляем пробелы и другие разделители тысяч из чисел
+        # Например: "3 000" -> "3000", "3,000" -> "3000", "3.000" -> "3000"
+        # ВАЖНО: обрабатываем только колонку частот, не keyword!
+        freq_exact_col = df[detected_cols['frequency_exact']]
+        
+        # Проверяем тип данных исходной колонки
+        if freq_exact_col.dtype == 'object':
+            # Если это строки, преобразуем и удаляем разделители тысяч
+            freq_exact_series = freq_exact_col.astype(str)
+            # Удаляем пробелы, запятые и точки (разделители тысяч)
+            freq_exact_series = freq_exact_series.str.replace(r'[\s,\.]', '', regex=True)
+        else:
+            # Если уже число - используем как есть
+            freq_exact_series = freq_exact_col
+        
         result_df['frequency_exact'] = pd.to_numeric(
-            df[detected_cols['frequency_exact']], errors='coerce'
+            freq_exact_series, errors='coerce'
         ).fillna(0).astype(int)
     else:
         result_df['frequency_exact'] = 0

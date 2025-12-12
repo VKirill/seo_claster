@@ -10,3 +10,6 @@ from .stats_panel import StatsPanel
 __all__ = ['ProjectPanel', 'QueryTableView', 'ClusterTreeView', 'StatsPanel']
 
 
+
+
+

@@ -142,5 +142,26 @@ class QueryLoader:
         print(f"   ✓ SERP: {df['serp_found_docs'].notna().sum()} записей")
         print(f"   ✓ Direct: {df['direct_shows'].notna().sum()} записей")
         
+        # Диагностика частот при загрузке из БД
+        if 'frequency_world' in df.columns:
+            non_zero_freq_world = (df['frequency_world'] > 0).sum()
+            total_rows = len(df)
+            print(f"   ✓ Частота (мир): {non_zero_freq_world} из {total_rows} запросов с ненулевой частотой")
+            if non_zero_freq_world == 0 and total_rows > 0:
+                print(f"   ⚠️  ВНИМАНИЕ: Все частоты (мир) равны нулю в БД!")
+                # Проверяем типы данных
+                print(f"   ℹ️  Тип данных frequency_world: {df['frequency_world'].dtype}")
+                print(f"   ℹ️  Примеры значений: {df['frequency_world'].head(10).tolist()}")
+        
+        if 'frequency_exact' in df.columns:
+            non_zero_freq_exact = (df['frequency_exact'] > 0).sum()
+            total_rows = len(df)
+            print(f"   ✓ Частота (точная): {non_zero_freq_exact} из {total_rows} запросов с ненулевой частотой")
+            if non_zero_freq_exact == 0 and total_rows > 0:
+                print(f"   ⚠️  ВНИМАНИЕ: Все частоты (точная) равны нулю в БД!")
+                # Проверяем типы данных
+                print(f"   ℹ️  Тип данных frequency_exact: {df['frequency_exact'].dtype}")
+                print(f"   ℹ️  Примеры значений: {df['frequency_exact'].head(10).tolist()}")
+        
         return df
 

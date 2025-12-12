@@ -137,3 +137,6 @@ class QueryTableView(QWidget):
         self.model.load_group(group_name)
 
 
+
+
+

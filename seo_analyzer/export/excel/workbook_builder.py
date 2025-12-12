@@ -11,7 +11,8 @@ from .data_writer import (
     create_clusters_summary_sheet,
     create_intent_summary_sheet,
     create_lsi_sheet,
-    create_intent_filtered_sheet
+    create_intent_filtered_sheet,
+    create_mixed_intent_sheet
 )
 from .faq_generator import create_faq_sheet
 # ОТКЛЮЧЕНО: from .hierarchy_sheet import create_hierarchy_sheet
@@ -63,39 +64,22 @@ class ExcelExporter:
             print("  📄 Создание листа 'Все запросы'...")
             create_all_queries_sheet(df, writer, self.formats, group_by_clusters)
             
-            # Листы кластеров: каждый кластер на отдельном листе
-            # Классификация по коммерческим факторам из SERP (домены + offer)
-            # Если сумма факторов >= 12, кластер считается коммерческим
-            if 'semantic_cluster_id' in df.columns:
-                print("  📄 Создание листов кластеров (каждый кластер на отдельном листе)...")
-                from .writers.cluster_sheets_writer import create_cluster_sheets
-                create_cluster_sheets(df, writer, self.formats, commercial_threshold=12)
+            # Лист 2: Коммерческие кластеры (>70% коммерческих запросов)
+            if 'main_intent' in df.columns and 'semantic_cluster_id' in df.columns:
+                print("  📄 Создание листа 'Коммерческие' (>70% коммерческих запросов)...")
+                create_intent_filtered_sheet(df, writer, self.formats, 'commercial', group_by_clusters)
             
-            # ОТКЛЮЧЕНО: Лист 2: Топ запросы по priority_score
-            # if 'priority_score' in df.columns:
-            #     print("  📄 Создание листа 'Топ приоритетных'...")
-            #     create_top_priority_sheet(df, writer, self.formats)
+            # Лист 3: Информационные кластеры (>70% информационных запросов)
+            if 'main_intent' in df.columns and 'semantic_cluster_id' in df.columns:
+                print("  📄 Создание листа 'Информационные' (>70% информационных запросов)...")
+                create_intent_filtered_sheet(df, writer, self.formats, 'informational', group_by_clusters)
             
-            # ОТКЛЮЧЕНО: Лист 3: Сводка по кластерам
-            # if 'semantic_cluster_id' in df.columns:
-            #     print("  📄 Создание листа 'Сводка по кластерам'...")
-            #     create_clusters_summary_sheet(df, writer, self.formats)
+            # Лист 4: Смешанные кластеры (30-70% коммерческих запросов)
+            if 'main_intent' in df.columns and 'semantic_cluster_id' in df.columns:
+                print("  📄 Создание листа 'Смешанные' (30-70% коммерческих запросов)...")
+                create_mixed_intent_sheet(df, writer, self.formats, group_by_clusters)
             
-            # ОТКЛЮЧЕНО: Лист 4: Сводка по интентам
-            # if 'main_intent' in df.columns:
-            #     print("  📄 Создание листа 'Сводка по интентам'...")
-            #     create_intent_summary_sheet(df, writer, self.formats)
-            
-            # ОТКЛЮЧЕНО: Лист 5: LSI фразы (если есть)
-            # if 'cluster_lsi_phrases' in df.columns:
-            #     print("  📄 Создание листа 'LSI фразы'...")
-            #     create_lsi_sheet(df, writer, self.formats)
-            
-            # ОТКЛЮЧЕНО: Лист 6: Иерархия проекта
-            # print("  📄 Создание листа 'Иерархия проекта'...")
-            # create_hierarchy_sheet(writer, self.formats, self.hierarchy_df)
-            
-            # Лист 4: FAQ - справка по столбцам
+            # Лист 5: FAQ - справка по столбцам
             print("  📄 Создание листа 'FAQ'...")
             create_faq_sheet(writer, self.formats)
         

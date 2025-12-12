@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from ..xml_text_extractor import XMLTextExtractor
 from .document_extractor import is_commercial_domain, is_info_domain
-from ...core.lemmatizer import lemmatize_word
+from ..lemmatizer import lemmatize_word
 
 
 def get_found_count(root: ET.Element) -> int:

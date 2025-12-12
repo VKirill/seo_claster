@@ -224,11 +224,17 @@ def apply_number_formats(
             format_to_use = formats['decimal']
         
         # Применяем формат к колонке (со 2-й строки, т.к. 1-я это заголовок)
+        # ВАЖНО: Записываем ВСЕ значения, включая 0, чтобы не потерять данные
         if format_to_use:
             for row_num in range(1, len(df) + 1):
                 try:
                     cell_value = df.iloc[row_num - 1, col_num]
-                    if pd.notna(cell_value) and isinstance(cell_value, (int, float)):
+                    # Записываем все числовые значения, включая 0
+                    if isinstance(cell_value, (int, float)):
                         worksheet.write(row_num, col_num, cell_value, format_to_use)
-                except:
+                    elif pd.notna(cell_value):
+                        # Если это не число, но не NaN, записываем как есть
+                        worksheet.write(row_num, col_num, cell_value)
+                except Exception as e:
+                    # Игнорируем ошибки записи отдельных ячеек
                     pass

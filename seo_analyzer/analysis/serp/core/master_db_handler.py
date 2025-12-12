@@ -7,6 +7,7 @@ import json
 from typing import Optional, Dict, Any
 
 from .result_formatter import ResultFormatter
+from seo_analyzer.core.cache.db.initializer import apply_sqlite_optimizations
 
 
 class MasterDBHandler:
@@ -44,6 +45,9 @@ class MasterDBHandler:
         try:
             conn = sqlite3.connect(self.master_db.db_path)
             cursor = conn.cursor()
+            
+            # Применяем оптимизации для ускорения чтения
+            apply_sqlite_optimizations(cursor)
             
             # Сначала проверяем текущую группу (если указана)
             if self.query_group:

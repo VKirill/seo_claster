@@ -57,3 +57,6 @@ def print_stage_separator(analyzer, width: int = 80):
     print(f"{prefix}{'-' * width}")
 
 
+
+
+
