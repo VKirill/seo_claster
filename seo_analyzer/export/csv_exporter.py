@@ -294,4 +294,168 @@ class CSVExporter:
         except Exception as e:
             print(f"⚠️ Ошибка экспорта топа: {e}")
             return False
+    
+    def export_serp_with_clusters(
+        self,
+        df: pd.DataFrame,
+        output_path: Path
+    ) -> bool:
+        """
+        Экспортирует CSV с данными кластеризации и SERP (title, description из первых 10 сайтов)
+        
+        Столбцы:
+        - keyword
+        - frequency_world
+        - frequency_exact
+        - semantic_cluster_id
+        - cluster_name
+        - cluster_lsi_phrases_str
+        - title (из первых 10 SERP документов)
+        - description (из первых 10 SERP документов)
+        
+        Args:
+            df: DataFrame с результатами
+            output_path: Путь для сохранения
+            
+        Returns:
+            True если успешно
+        """
+        try:
+            print(f"💾 Экспорт SERP с кластерами: {output_path.name}...")
+            
+            import json
+            
+            # Проверяем наличие необходимых колонок
+            required_columns = ['keyword', 'frequency_world', 'frequency_exact']
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            if missing_columns:
+                print(f"⚠️ Отсутствуют обязательные колонки: {missing_columns}")
+                return False
+            
+            # Создаем новый DataFrame с нужными столбцами
+            export_data = {
+                'keyword': df['keyword'],
+                'frequency_world': df.get('frequency_world', 0),
+                'frequency_exact': df.get('frequency_exact', 0),
+            }
+            
+            # Добавляем данные кластеризации
+            if 'semantic_cluster_id' in df.columns:
+                export_data['semantic_cluster_id'] = df['semantic_cluster_id']
+            else:
+                export_data['semantic_cluster_id'] = None
+            
+            if 'cluster_name' in df.columns:
+                export_data['cluster_name'] = df['cluster_name']
+            else:
+                export_data['cluster_name'] = ''
+            
+            # Добавляем cluster_lsi_phrases_str
+            if 'cluster_lsi_phrases_str' in df.columns:
+                export_data['cluster_lsi_phrases_str'] = df['cluster_lsi_phrases_str']
+            elif 'cluster_lsi_phrases' in df.columns:
+                # Конвертируем список словарей в строку
+                def format_lsi_phrases(lsi_data):
+                    if not lsi_data or (isinstance(lsi_data, float) and pd.isna(lsi_data)):
+                        return ''
+                    if isinstance(lsi_data, str):
+                        try:
+                            lsi_data = json.loads(lsi_data)
+                        except:
+                            return lsi_data if lsi_data else ''
+                    if isinstance(lsi_data, list):
+                        phrases = []
+                        for item in lsi_data[:30]:  # Топ-30
+                            if isinstance(item, dict):
+                                phrase = item.get('phrase', '')
+                                if phrase:
+                                    phrases.append(phrase)
+                            elif isinstance(item, str):
+                                if item:
+                                    phrases.append(item)
+                        return ', '.join(phrases) if phrases else ''
+                    return ''
+                
+                export_data['cluster_lsi_phrases_str'] = df['cluster_lsi_phrases'].apply(format_lsi_phrases)
+            else:
+                export_data['cluster_lsi_phrases_str'] = ''
+            
+            # Извлекаем title и description из первых 10 SERP документов
+            def extract_serp_titles_and_descriptions(serp_data):
+                """Извлекает title и description из первых 10 SERP документов"""
+                titles = []
+                descriptions = []
+                
+                if not serp_data or (isinstance(serp_data, float) and pd.isna(serp_data)):
+                    return '', ''
+                
+                # Если это строка (JSON), парсим её
+                if isinstance(serp_data, str):
+                    try:
+                        serp_data = json.loads(serp_data)
+                    except:
+                        return '', ''
+                
+                # Если это список документов
+                if isinstance(serp_data, list):
+                    # Берем первые 10 документов
+                    for doc in serp_data[:10]:
+                        if isinstance(doc, dict):
+                            # Извлекаем title
+                            title = doc.get('title', '') or doc.get('headline', '')
+                            if title:
+                                titles.append(title)
+                            
+                            # Извлекаем description из passages (приоритет) или snippet/extended_text (fallback)
+                            description = doc.get('passages', '')
+                            if not description:
+                                description = doc.get('snippet', '') or doc.get('extended_text', '') or doc.get('headline', '')
+                            if description:
+                                descriptions.append(description)
+                
+                # Объединяем через разделитель
+                titles_str = ' ; '.join(titles) if titles else ''
+                descriptions_str = ' ; '.join(descriptions) if descriptions else ''
+                
+                return titles_str, descriptions_str
+            
+            # Применяем функцию извлечения
+            serp_titles_descriptions = df.get('serp_documents', pd.Series()).apply(extract_serp_titles_and_descriptions)
+            
+            # Если serp_documents нет, пробуем serp_top_urls
+            if serp_titles_descriptions.empty or serp_titles_descriptions.isna().all():
+                serp_titles_descriptions = df.get('serp_top_urls', pd.Series()).apply(extract_serp_titles_and_descriptions)
+            
+            # Разделяем на title и description
+            export_data['title'] = serp_titles_descriptions.apply(lambda x: x[0] if isinstance(x, tuple) else '')
+            export_data['description'] = serp_titles_descriptions.apply(lambda x: x[1] if isinstance(x, tuple) else '')
+            
+            # Создаем DataFrame
+            export_df = pd.DataFrame(export_data)
+            
+            # Заполняем пустые значения
+            export_df['semantic_cluster_id'] = export_df['semantic_cluster_id'].fillna('')
+            export_df['cluster_name'] = export_df['cluster_name'].fillna('')
+            export_df['cluster_lsi_phrases_str'] = export_df['cluster_lsi_phrases_str'].fillna('')
+            export_df['title'] = export_df['title'].fillna('')
+            export_df['description'] = export_df['description'].fillna('')
+            
+            # Сохраняем CSV
+            export_df.to_csv(
+                output_path,
+                index=False,
+                encoding=self.encoding,
+                sep=';',
+                quoting=1,
+                quotechar='"'
+            )
+            
+            print(f"✓ Экспортировано {len(export_df)} запросов в {output_path}")
+            return True
+            
+        except Exception as e:
+            import traceback
+            print(f"⚠️ Ошибка экспорта SERP с кластерами: {e}")
+            print(traceback.format_exc())
+            return False
 

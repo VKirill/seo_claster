@@ -142,3 +142,4 @@ df['profit'] = kei_direct_profitability(df, avg_check=5000, conversion_rate=2)
 
 
 
+

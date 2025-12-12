@@ -21,7 +21,9 @@ class RecoveryHandler:
         api_key: str,
         lr: int,
         master_db_handler: MasterDBHandler,
-        query_group: str
+        query_group: str,
+        proxies: List[str] = None,
+        proxy_file: str = None
     ):
         """
         Args:
@@ -29,11 +31,15 @@ class RecoveryHandler:
             lr: Регион поиска
             master_db_handler: Обработчик Master DB
             query_group: Название группы запросов
+            proxies: Список прокси в формате ['http://user:pass@ip:port', ...]
+            proxy_file: Путь к файлу с прокси (по одному на строку)
         """
         self.api_key = api_key
         self.lr = lr
         self.master_db_handler = master_db_handler
         self.query_group = query_group
+        self.proxies = proxies
+        self.proxy_file = proxy_file
     
     async def recover_pending_requests(self) -> int:
         """
@@ -64,7 +70,9 @@ class RecoveryHandler:
         recoverer = PendingQueriesRecoverer(
             api_key=self.api_key,
             lr=self.lr,
-            master_db_handler=self.master_db_handler
+            master_db_handler=self.master_db_handler,
+            proxies=self.proxies,
+            proxy_file=self.proxy_file
         )
         
         recovered_count = await recoverer.recover(all_pending)

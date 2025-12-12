@@ -50,3 +50,4 @@ def kei_soltyk_effectiveness_coefficient(df: pd.DataFrame) -> pd.Series:
 
 
 
+

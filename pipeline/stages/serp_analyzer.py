@@ -86,6 +86,33 @@ async def analyze_serp_stage(args, analyzer):
     serp_device = getattr(args, 'serp_device', 'desktop')
     serp_site = getattr(args, 'serp_site', None)
     
+    # Получаем прокси из args или config_local.py
+    serp_proxies = getattr(args, 'serp_proxies', None)
+    serp_proxy_file = getattr(args, 'serp_proxy_file', None)
+    
+    # Если прокси не указаны в args, пробуем config_local.py
+    if not serp_proxies and not serp_proxy_file:
+        try:
+            import config_local
+            serp_proxies = getattr(config_local, 'SERP_PROXIES', None)
+            serp_proxy_file = getattr(config_local, 'SERP_PROXY_FILE', None)
+            if serp_proxies or serp_proxy_file:
+                print("✓ Прокси загружены из config_local.py")
+        except ImportError:
+            pass
+    
+    # Если прокси все еще не указаны, пробуем загрузить из socks_working.txt по умолчанию
+    if not serp_proxies and not serp_proxy_file:
+        from pathlib import Path
+        default_proxy_file = Path('socks_working.txt')
+        if default_proxy_file.exists():
+            serp_proxy_file = str(default_proxy_file)
+            print(f"✓ Автоматически загружен файл прокси: {serp_proxy_file}")
+    
+    # Если прокси указаны как строка (через запятую), преобразуем в список
+    if isinstance(serp_proxies, str):
+        serp_proxies = [p.strip() for p in serp_proxies.split(',') if p.strip()]
+    
     analyzer.serp_analyzer = SERPAnalyzer(
         api_key=api_key,
         lr=serp_region,
@@ -97,14 +124,61 @@ async def analyze_serp_stage(args, analyzer):
         use_master_db=True,  # Используем только Master DB
         use_batch_async=use_batch_async,  # 🚀 МАССОВЫЙ ASYNC РЕЖИМ (по умолчанию)
         device=serp_device,
-        site=serp_site
+        site=serp_site,
+        proxies=serp_proxies,
+        proxy_file=serp_proxy_file
     )
+    
+    # Показываем информацию о прокси
+    if serp_proxies or serp_proxy_file:
+        proxy_count = len(serp_proxies) if serp_proxies else 0
+        if serp_proxy_file:
+            try:
+                from pathlib import Path
+                proxy_path = Path(serp_proxy_file)
+                if proxy_path.exists():
+                    with open(proxy_path, 'r', encoding='utf-8') as f:
+                        file_count = len([line.strip() for line in f if line.strip() and not line.strip().startswith('#')])
+                    proxy_count += file_count
+            except:
+                pass
+        print_stage(analyzer, f"🌐 Используется {proxy_count} прокси для ротации IP")
     
     if use_batch_async:
         print_stage(analyzer, "🚀 Режим: BATCH ASYNC (массовая отправка → параллельное получение)")
     
     # Получаем список запросов
     all_queries = analyzer.df['keyword'].tolist()
+    
+    # ВАЖНО: Проверяем наличие реальных данных в serp_top_urls
+    # Если данные загружены из БД, но serp_top_urls пустые - нужно собрать заново
+    queries_without_urls = []
+    if 'serp_top_urls' in analyzer.df.columns:
+        for idx, row in analyzer.df.iterrows():
+            keyword = row.get('keyword')
+            serp_top_urls = row.get('serp_top_urls')
+            
+            # Проверяем что serp_top_urls не пустой
+            has_urls = False
+            if serp_top_urls is not None:
+                if isinstance(serp_top_urls, list):
+                    has_urls = len(serp_top_urls) > 0
+                elif isinstance(serp_top_urls, str):
+                    serp_top_urls_str = serp_top_urls.strip()
+                    if serp_top_urls_str and serp_top_urls_str not in ('', '[]', 'null', 'NULL', 'None'):
+                        try:
+                            import json
+                            parsed = json.loads(serp_top_urls_str)
+                            has_urls = isinstance(parsed, list) and len(parsed) > 0
+                        except:
+                            has_urls = False
+            
+            if not has_urls and keyword:
+                queries_without_urls.append(keyword)
+        
+        if queries_without_urls:
+            print_stage(analyzer, f"⚠️  Обнаружено {len(queries_without_urls)} запросов с пустым serp_top_urls")
+            print_stage(analyzer, f"   Будет выполнена повторная загрузка через XMLStock API...")
     
     print_stage(analyzer, f"📊 Анализ SERP для {len(all_queries)} запросов (кэш проверяется автоматически)...")
     
@@ -115,10 +189,16 @@ async def analyze_serp_stage(args, analyzer):
             print_stage(analyzer, f"  [{current}/{total}]{status_text} {query[:60]}...")
     
     # Анализируем пакетом (кэш проверяется внутри - мгновенная загрузка закэшированных)
+    # ВАЖНО: Если есть запросы без URL, они будут автоматически загружены через API
+    
+    # Если есть query_to_group_map (объединенная обработка всех групп), используем его
+    query_to_group_map = getattr(analyzer, 'query_to_group_map', None)
+    
     serp_results = await analyzer.serp_analyzer.analyze_queries_batch(
         all_queries,
         max_concurrent=SERP_CONFIG['api']['max_concurrent'],
-        progress_callback=progress_callback
+        progress_callback=progress_callback,
+        query_to_group_map=query_to_group_map
     )
     
     # Добавляем результаты в DataFrame
@@ -159,33 +239,66 @@ async def analyze_serp_stage(args, analyzer):
         lambda x: serp_dict.get(x, {}).get('lsi_phrases', [])
     )
     
-    # Домены из SERP (для кластеризации) - ТОП-20
-    # ВАЖНО: Сначала проверяем, есть ли serp_top_urls из Master DB
-    if 'serp_top_urls' in analyzer.df.columns:
-        # Данные уже загружены из Master DB - создаем serp_urls из serp_top_urls
-        def extract_urls_from_top_urls(serp_top_urls):
-            """Извлекает список URL из serp_top_urls для кластеризации"""
-            if not serp_top_urls or not isinstance(serp_top_urls, list):
-                return []
-            
-            urls = []
-            for item in serp_top_urls[:20]:  # TOP-20
-                if isinstance(item, dict):
-                    url = item.get('url', '')
-                elif isinstance(item, str):
-                    url = item
-                else:
-                    continue
-                
-                if url:
-                    urls.append(url)
-            
-            return urls
+    # ВАЖНО: Обновляем serp_top_urls из результатов анализа (включая закэшированные)
+    # Это нужно для того, чтобы закэшированные данные тоже попали в DataFrame
+    def update_serp_top_urls(query):
+        """Обновляет serp_top_urls из результатов SERP анализа"""
+        result = serp_dict.get(query, {})
+        documents = result.get('documents', [])
         
-        analyzer.df['serp_urls'] = analyzer.df['serp_top_urls'].apply(extract_urls_from_top_urls)
-        print_stage(analyzer, "   ✓ serp_urls созданы из serp_top_urls (Master DB)")
+        if not documents:
+            return None  # Возвращаем None чтобы не перезаписать существующие данные
+        
+        # Если documents - список словарей с полной информацией (title, snippet, url)
+        if isinstance(documents, list) and len(documents) > 0:
+            if isinstance(documents[0], dict):
+                # Возвращаем TOP-20 документов с полной информацией
+                return documents[:20]
+            elif isinstance(documents[0], str):
+                # Если это список URL строк - преобразуем в формат с dict
+                return [{'url': url} for url in documents[:20]]
+        
+        return None
+    
+    # Обновляем serp_top_urls из результатов анализа
+    # Создаем колонку если её нет, или обновляем существующую
+    updated_top_urls = analyzer.df['keyword'].map(update_serp_top_urls)
+    
+    # Обновляем только те записи, где есть новые данные
+    if 'serp_top_urls' not in analyzer.df.columns:
+        analyzer.df['serp_top_urls'] = updated_top_urls
     else:
-        # Данных из Master DB нет - извлекаем из serp_dict
+        # Обновляем только те, где есть новые данные (не None)
+        mask = updated_top_urls.notna()
+        analyzer.df.loc[mask, 'serp_top_urls'] = updated_top_urls[mask]
+    
+    # Домены из SERP (для кластеризации) - ТОП-20
+    # Создаем serp_urls из serp_top_urls (который теперь обновлен из результатов анализа)
+    def extract_urls_from_top_urls(serp_top_urls):
+        """Извлекает список URL из serp_top_urls для кластеризации"""
+        if not serp_top_urls or not isinstance(serp_top_urls, list):
+            return []
+        
+        urls = []
+        for item in serp_top_urls[:20]:  # TOP-20
+            if isinstance(item, dict):
+                url = item.get('url', '')
+            elif isinstance(item, str):
+                url = item
+            else:
+                continue
+            
+            if url:
+                urls.append(url)
+        
+        return urls
+    
+    # Используем обновленный serp_top_urls для создания serp_urls
+    if 'serp_top_urls' in analyzer.df.columns:
+        analyzer.df['serp_urls'] = analyzer.df['serp_top_urls'].apply(extract_urls_from_top_urls)
+        print_stage(analyzer, "   ✓ serp_urls созданы из serp_top_urls (обновлено из результатов анализа)")
+    else:
+        # Если serp_top_urls нет, извлекаем напрямую из serp_dict
         def extract_domains(query):
             result = serp_dict.get(query, {})
             documents = result.get('documents', [])
@@ -215,11 +328,11 @@ async def analyze_serp_stage(args, analyzer):
         analyzer.df['serp_urls'] = analyzer.df['keyword'].map(extract_domains)
     
     # Полные данные документов SERP (для экспорта с title, snippet и URL)
-    # Проверяем: если serp_top_urls уже есть (из Master DB), используем его
+    # Используем обновленный serp_top_urls (который теперь содержит данные из кэша и API)
     if 'serp_top_urls' in analyzer.df.columns:
-        # Данные уже загружены из Master DB и нормализованы
+        # Данные обновлены из результатов анализа (включая закэшированные)
         analyzer.df['serp_documents'] = analyzer.df['serp_top_urls']
-        print_stage(analyzer, "   ✓ serp_documents загружены из Master DB (с title и snippet)")
+        print_stage(analyzer, "   ✓ serp_documents обновлены из результатов анализа (включая кэш)")
     else:
         # Извлекаем из свежих данных API
         def extract_documents(query):
@@ -269,6 +382,70 @@ async def analyze_serp_stage(args, analyzer):
     if len(analyzer.df) > 0:
         print_stage(analyzer, f"  SERP URLs заполнено: {urls_filled} запросов ({urls_filled/len(analyzer.df)*100:.1f}%)")
         print_stage(analyzer, f"  SERP URLs пусто: {urls_empty} запросов ({urls_empty/len(analyzer.df)*100:.1f}%)")
+        
+        # КРИТИЧНО: Проверяем что все запросы имеют заполненный serp_top_urls перед переходом к кластеризации
+        if 'serp_top_urls' in analyzer.df.columns:
+            queries_without_top_urls = []
+            for idx, row in analyzer.df.iterrows():
+                keyword = row.get('keyword')
+                serp_top_urls = row.get('serp_top_urls')
+                
+                # Проверяем что serp_top_urls не пустой
+                has_urls = False
+                if serp_top_urls is not None:
+                    if isinstance(serp_top_urls, list):
+                        has_urls = len(serp_top_urls) > 0
+                    elif isinstance(serp_top_urls, str):
+                        serp_top_urls_str = serp_top_urls.strip()
+                        if serp_top_urls_str and serp_top_urls_str not in ('', '[]', 'null', 'NULL', 'None'):
+                            try:
+                                import json
+                                parsed = json.loads(serp_top_urls_str)
+                                has_urls = isinstance(parsed, list) and len(parsed) > 0
+                            except:
+                                has_urls = False
+                
+                if not has_urls and keyword:
+                    queries_without_top_urls.append(keyword)
+            
+            if queries_without_top_urls:
+                print_stage(analyzer, "")
+                print_stage(analyzer, f"⚠️  КРИТИЧНО: Обнаружено {len(queries_without_top_urls)} запросов БЕЗ serp_top_urls!")
+                print_stage(analyzer, f"   Система НЕ перейдет к кластеризации пока все запросы не будут обработаны.")
+                print_stage(analyzer, f"   Повторная попытка загрузки через API...")
+                
+                # Повторно загружаем только те запросы, у которых нет serp_top_urls
+                retry_results = await analyzer.serp_analyzer.analyze_queries_batch(
+                    queries_without_top_urls,
+                    max_concurrent=SERP_CONFIG['api']['max_concurrent'],
+                    progress_callback=progress_callback
+                )
+                
+                # Обновляем результаты
+                retry_dict = {result['query']: result for result in retry_results}
+                for query, result in retry_dict.items():
+                    if query in serp_dict:
+                        serp_dict[query] = result
+                
+                # Обновляем serp_top_urls для повторно загруженных запросов
+                updated_top_urls_retry = analyzer.df['keyword'].map(update_serp_top_urls)
+                mask_retry = updated_top_urls_retry.notna()
+                analyzer.df.loc[mask_retry, 'serp_top_urls'] = updated_top_urls_retry[mask_retry]
+                
+                # Обновляем serp_urls
+                analyzer.df['serp_urls'] = analyzer.df['serp_top_urls'].apply(extract_urls_from_top_urls)
+                
+                # Проверяем результат повторной загрузки
+                final_urls_filled = (analyzer.df['serp_urls'].apply(lambda x: isinstance(x, list) and len(x) > 0)).sum()
+                final_urls_empty = (analyzer.df['serp_urls'].apply(lambda x: not isinstance(x, list) or len(x) == 0)).sum()
+                
+                print_stage(analyzer, f"   После повторной загрузки:")
+                print_stage(analyzer, f"   ✓ SERP URLs заполнено: {final_urls_filled} запросов ({final_urls_filled/len(analyzer.df)*100:.1f}%)")
+                print_stage(analyzer, f"   ⚠️  SERP URLs пусто: {final_urls_empty} запросов ({final_urls_empty/len(analyzer.df)*100:.1f}%)")
+                
+                if final_urls_empty > 0:
+                    print_stage(analyzer, f"   ⚠️  ВНИМАНИЕ: {final_urls_empty} запросов все еще без SERP данных!")
+                    print_stage(analyzer, f"   Кластеризация будет выполнена только для запросов с данными.")
     else:
         print_stage(analyzer, f"  ⚠️  DataFrame пустой после фильтрации - нет запросов для анализа")
     

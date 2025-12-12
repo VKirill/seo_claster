@@ -70,7 +70,8 @@ class QueryAnalyzer:
         progress_callback: Optional[Callable] = None,
         batch_size: int = 500,
         use_batch_async: bool = True,
-        batch_processor=None
+        batch_processor=None,
+        query_to_group_map: Dict[str, str] = None
     ) -> List[Dict[str, Any]]:
         """
         Анализировать пакет запросов с батчингом
@@ -91,7 +92,9 @@ class QueryAnalyzer:
         
         # Если включен batch async режим - используем его!
         if use_batch_async and batch_processor:
-            return await batch_processor.analyze_queries_batch_async_mode(queries, progress_callback)
+            return await batch_processor.analyze_queries_batch_async_mode(
+                queries, progress_callback, query_to_group_map=query_to_group_map
+            )
         
         # Иначе используем старый режим (батчами)
         total_queries = len(queries)

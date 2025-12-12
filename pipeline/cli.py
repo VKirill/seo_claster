@@ -139,18 +139,73 @@ async def main():
         manager = QueryGroupManager()
         groups = manager.discover_groups()
         
-        # Ищем группу по имени (без расширения)
+        # Ищем группу по имени (без расширения, с нормализацией похожих символов)
         group_name = input_file.replace('.csv', '')
-        group = manager.get_group(group_name)
+        group = None
+        
+        # Используем улучшенный поиск с нормализацией (fuzzy=True по умолчанию)
+        group = manager.get_group(group_name, fuzzy=True)
+        
+        # Если найдена группа - используем правильное имя
+        if group:
+            group_name = group.name
         
         if group and group.input_file.exists():
             # Это группа - обрабатываем её
             print(f"📁 Режим: Обработка группы '{group_name}'")
             print()
             args.group = group_name
+            args.input_file = None  # Очищаем input_file чтобы не пытаться загрузить файл по названию группы
             analyzer = SEOAnalyzer(args)
             await analyzer.run()
             return
+        elif group and not group.input_file.exists():
+            # Группа найдена, но файл не существует
+            print(f"❌ Группа '{group_name}' найдена, но файл не существует: {group.input_file}")
+            print(f"   Доступные группы:")
+            for g in groups:
+                status = "✓" if g.input_file.exists() else "✗"
+                print(f"   {status} {g.name}: {g.input_file}")
+            return
+        elif not group:
+            # Группа не найдена - показываем доступные группы
+            print(f"⚠️  Группа '{group_name}' не найдена в semantika/")
+            if groups:
+                print(f"   Доступные группы:")
+                for g in groups:
+                    status = "✓" if g.input_file.exists() else "✗"
+                    print(f"   {status} {g.name}")
+                
+                # Проверяем, может быть это опечатка (похожие имена)
+                from seo_analyzer.core.query_groups import normalize_group_name
+                normalized_input = normalize_group_name(group_name)
+                similar_groups = [g for g in groups if normalize_group_name(g.name) == normalized_input]
+                
+                if similar_groups:
+                    print()
+                    print(f"💡 Возможно, вы имели в виду:")
+                    for g in similar_groups:
+                        print(f"   → {g.name}")
+                    print()
+                    return  # Не продолжаем выполнение
+            else:
+                print(f"   Папка semantika/ пуста или не существует")
+            
+            # Проверяем, является ли input_file путем к существующему файлу
+            potential_file = Path(input_file)
+            if not potential_file.is_absolute():
+                potential_file = Path.cwd() / potential_file
+            
+            if potential_file.exists() and potential_file.is_file():
+                # Это существующий файл - продолжаем как обычный файл (обратная совместимость)
+                print()
+                print(f"📁 Файл найден по пути: {potential_file}")
+                print()
+            else:
+                # Это не группа и не файл - выходим
+                print()
+                print("❌ Не удалось найти группу или файл. Проверьте имя группы или путь к файлу.")
+                return
     
     # Обычный режим: один файл (обратная совместимость)
     if input_file is None:

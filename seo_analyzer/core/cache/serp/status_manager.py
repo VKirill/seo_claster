@@ -215,6 +215,21 @@ class SERPStatusManager:
             )
             
             conn.commit()
+            
+            # Проверяем что данные действительно сохранились
+            cursor.execute('''
+                SELECT serp_top_urls, serp_lsi_phrases
+                FROM master_queries
+                WHERE group_name = ? AND keyword = ?
+            ''', (group_name, keyword))
+            check_row = cursor.fetchone()
+            if check_row and check_row[0] and check_row[1]:
+                # Данные успешно сохранены
+                pass
+            elif check_row:
+                # Частичное сохранение - логируем
+                import logging
+                logging.warning(f"Частичное сохранение для {keyword}: top_urls={bool(check_row[0])}, lsi={bool(check_row[1])}")
         finally:
             conn.close()
     

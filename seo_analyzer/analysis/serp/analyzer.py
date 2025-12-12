@@ -28,7 +28,9 @@ class SERPAnalyzer:
         use_master_db: bool = True,
         use_batch_async: bool = True,
         device: str = 'desktop',
-        site: str = None
+        site: str = None,
+        proxies: List[str] = None,
+        proxy_file: str = None
     ):
         """
         Инициализация анализатора SERP
@@ -45,6 +47,8 @@ class SERPAnalyzer:
             use_batch_async: Массовый асинхронный режим (отправка всех сразу, потом получение)
             device: Устройство (desktop, mobile, tablet, iphone, android)
             site: Домен для фильтрации (site:domain.ru)
+            proxies: Список прокси в формате ['http://user:pass@ip:port', ...]
+            proxy_file: Путь к файлу с прокси (по одному на строку)
         """
         self.api_key = api_key
         self.lr = lr
@@ -53,6 +57,8 @@ class SERPAnalyzer:
         self.query_group = query_group
         self.use_master_db = use_master_db
         self.use_batch_async = use_batch_async
+        self.proxies = proxies
+        self.proxy_file = proxy_file
         
         # Master DB - ЕДИНСТВЕННЫЙ источник SERP данных
         self.master_db = None
@@ -88,7 +94,14 @@ class SERPAnalyzer:
         # Инициализация модулей
         result_formatter = ResultFormatter(lr)
         master_db_handler = MasterDBHandler(self.master_db, query_group, lr)
-        recovery_handler = RecoveryHandler(api_key, lr, master_db_handler, query_group)
+        recovery_handler = RecoveryHandler(
+            api_key, 
+            lr, 
+            master_db_handler, 
+            query_group,
+            proxies=self.proxies,
+            proxy_file=self.proxy_file
+        )
         
         self.query_analyzer = QueryAnalyzer(
             self.api_client,
@@ -106,7 +119,9 @@ class SERPAnalyzer:
             self.stats,
             recovery_handler,
             device=device,
-            site=site
+            site=site,
+            proxies=proxies,
+            proxy_file=proxy_file
         )
         
         self.recovery_handler = recovery_handler
@@ -124,7 +139,8 @@ class SERPAnalyzer:
         queries: List[str],
         max_concurrent: int = None,
         progress_callback: Optional[callable] = None,
-        batch_size: int = 500
+        batch_size: int = 500,
+        query_to_group_map: Dict[str, str] = None
     ) -> List[Dict[str, Any]]:
         """Анализировать пакет запросов с батчингом"""
         return await self.query_analyzer.analyze_queries_batch(
@@ -133,7 +149,8 @@ class SERPAnalyzer:
             progress_callback,
             batch_size,
             self.use_batch_async,
-            self.batch_processor
+            self.batch_processor,
+            query_to_group_map=query_to_group_map
         )
     
     async def recover_pending_requests(self) -> int:

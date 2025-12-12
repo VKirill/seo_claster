@@ -88,6 +88,28 @@ class QuerySaver:
             }
             
             df_copy = df.copy()
+            
+            # КРИТИЧНО: Проверяем наличие колонки 'keyword'
+            if 'keyword' not in df_copy.columns:
+                # Пытаемся создать колонку 'keyword' из индекса, если индекс содержит строки
+                if df_copy.index.dtype == 'object' or isinstance(df_copy.index[0] if len(df_copy) > 0 else None, str):
+                    df_copy['keyword'] = df_copy.index.astype(str)
+                else:
+                    # Если индекс не подходит, пытаемся найти альтернативные колонки
+                    alternative_keyword_cols = ['query', 'запрос', 'keyword_text', 'text']
+                    keyword_col = None
+                    for col in alternative_keyword_cols:
+                        if col in df_copy.columns:
+                            keyword_col = col
+                            break
+                    
+                    if keyword_col:
+                        df_copy['keyword'] = df_copy[keyword_col].astype(str)
+                    else:
+                        # Если ничего не найдено - создаем колонку из индекса как последний вариант
+                        df_copy['keyword'] = df_copy.index.astype(str)
+                        print(f"  ⚠️  Колонка 'keyword' отсутствует, создана из индекса")
+            
             for df_col, db_col in column_mapping.items():
                 if df_col in df_copy.columns and db_col not in df_copy.columns:
                     df_copy[db_col] = df_copy[df_col]

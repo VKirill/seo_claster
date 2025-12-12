@@ -11,6 +11,48 @@ from .group_config import QueryGroup
 from .group_database import GroupDatabaseManager
 
 
+def normalize_group_name(name: str) -> str:
+    """
+    Нормализация имени группы для поиска.
+    
+    Заменяет похожие латинские буквы на кириллические для обработки опечаток.
+    Например: 'фотосесcия' (с латинской 'c') → 'фотосессия' (с кириллической 'с')
+    
+    Args:
+        name: Имя группы для нормализации
+        
+    Returns:
+        Нормализованное имя группы
+    """
+    if not name:
+        return name
+    
+    # Маппинг похожих латинских букв на кириллические
+    # Часто путают: a→а, c→с, e→е, o→о, p→р, x→х, y→у
+    char_map = {
+        'a': 'а',  # латинская a → кириллическая а
+        'c': 'с',  # латинская c → кириллическая с
+        'e': 'е',  # латинская e → кириллическая е
+        'o': 'о',  # латинская o → кириллическая о
+        'p': 'р',  # латинская p → кириллическая р
+        'x': 'х',  # латинская x → кириллическая х
+        'y': 'у',  # латинская y → кириллическая у
+        'A': 'А',
+        'C': 'С',
+        'E': 'Е',
+        'O': 'О',
+        'P': 'Р',
+        'X': 'Х',
+        'Y': 'У',
+    }
+    
+    normalized = []
+    for char in name:
+        normalized.append(char_map.get(char, char))
+    
+    return ''.join(normalized)
+
+
 class QueryGroupManager:
     """Менеджер групп запросов"""
     
@@ -76,11 +118,46 @@ class QueryGroupManager:
         self.groups.append(group)
         return group
     
-    def get_group(self, name: str) -> Optional[QueryGroup]:
-        """Получить группу по имени"""
+    def get_group(self, name: str, fuzzy: bool = True) -> Optional[QueryGroup]:
+        """
+        Получить группу по имени.
+        
+        Args:
+            name: Имя группы для поиска
+            fuzzy: Если True, выполняет нечувствительный к регистру поиск
+                  и нормализацию похожих символов (латинские → кириллические)
+        
+        Returns:
+            Найденная группа или None
+        """
+        # Сначала пробуем точное совпадение
         for group in self.groups:
             if group.name == name:
                 return group
+        
+        if not fuzzy:
+            return None
+        
+        # Нечувствительный к регистру поиск
+        name_lower = name.lower()
+        for group in self.groups:
+            if group.name.lower() == name_lower:
+                return group
+        
+        # Нормализация похожих символов (латинские → кириллические)
+        normalized_name = normalize_group_name(name)
+        if normalized_name != name:
+            # Пробуем точное совпадение с нормализованным именем
+            for group in self.groups:
+                if group.name == normalized_name:
+                    return group
+            
+            # Нечувствительный к регистру поиск с нормализованным именем
+            normalized_lower = normalized_name.lower()
+            for group in self.groups:
+                if group.name.lower() == normalized_lower:
+                    return group
+        
         return None
     
     def set_current_group(self, name: str):

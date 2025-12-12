@@ -132,6 +132,10 @@ async def export_results_stage(args, analyzer):
     csv_path = analyzer.output_dir / f"seo_analysis_full{file_suffix}.csv"
     analyzer.csv_exporter.export_full_results(analyzer.df, csv_path)
     
+    # CSV экспорт с SERP данными (title, description из первых 10 сайтов)
+    serp_csv_path = analyzer.output_dir / f"seo_analysis_serp_clusters{file_suffix}.csv"
+    analyzer.csv_exporter.export_serp_with_clusters(analyzer.df, serp_csv_path)
+    
     # Топ запросы (ОТКЛЮЧЕНО: не используется)
     # top_csv = analyzer.output_dir / "seo_analysis_top1000.csv"
     # analyzer.csv_exporter.export_top_queries(analyzer.df, top_csv, top_n=1000)
