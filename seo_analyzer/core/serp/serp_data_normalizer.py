@@ -51,8 +51,14 @@ class SERPDataNormalizer:
             serp_data = serp_data.strip()
             if not serp_data or serp_data == 'null' or serp_data == 'None' or serp_data == 'NULL':
                 return []
+            # Проверяем на пустой JSON массив
+            if serp_data == '[]':
+                return []
             try:
                 serp_data = json.loads(serp_data)
+                # Если распарсилось как пустой список
+                if isinstance(serp_data, list) and len(serp_data) == 0:
+                    return []
             except (json.JSONDecodeError, TypeError):
                 # Если не JSON - возможно это разделенные URL
                 if '|' in serp_data:

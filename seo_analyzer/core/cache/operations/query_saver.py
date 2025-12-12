@@ -141,11 +141,15 @@ class QuerySaver:
             
             # Объединяем существующие данные с новыми
             frequencies_restored_from_db_count = 0
+            # ВАЖНО: Создаем индекс по keyword для быстрого поиска существующих данных
+            existing_data_by_keyword = {}
             if existing_df is not None and len(existing_df) > 0:
+                existing_df_indexed = existing_df.set_index('keyword')
                 for idx, row in df_copy.iterrows():
                     keyword = row.get('keyword')
-                    if keyword and keyword in existing_df.index:
-                        existing_row = existing_df.loc[keyword]
+                    if keyword and keyword in existing_df_indexed.index:
+                        existing_row = existing_df_indexed.loc[keyword]
+                        existing_data_by_keyword[keyword] = existing_row
                         
                         # Сохраняем базовые данные (частоты) из БД если их нет в DataFrame
                         # ВАЖНО: Приоритеты:
@@ -220,13 +224,36 @@ class QuerySaver:
                                     df_copy[field] = None
                                 
                                 if pd.notna(existing_val):
+                                    # ВАЖНО: Для serp_top_urls и serp_lsi_phrases проверяем пустые списки
+                                    # Пустые списки не должны перезаписывать данные из БД!
+                                    is_empty_list = isinstance(df_val, list) and len(df_val) == 0
+                                    is_empty_str = isinstance(df_val, str) and df_val.strip() in ('', '[]', 'null', 'NULL', 'None')
+                                    
                                     # Безопасная проверка df_val после преобразования в скаляр
-                                    if pd.isna(df_val) or df_val == '' or df_val == 0:
+                                    if pd.isna(df_val) or df_val == '' or df_val == 0 or is_empty_list or is_empty_str:
+                                        # Для SERP полей (списки/JSON) - не перезаписываем если в БД есть данные
+                                        if field in ('serp_top_urls', 'serp_lsi_phrases'):
+                                            # Проверяем что в БД действительно есть данные (не пустые)
+                                            if isinstance(existing_val, str):
+                                                existing_val_str = existing_val.strip()
+                                                if existing_val_str and existing_val_str not in ('', '[]', 'null', 'NULL', 'None'):
+                                                    # В БД есть данные - не перезаписываем пустым значением
+                                                    continue
+                                            elif isinstance(existing_val, (list, tuple)) and len(existing_val) > 0:
+                                                # В БД есть данные - не перезаписываем пустым значением
+                                                continue
+                                        
                                         # Дополнительная проверка: если existing_val все еще Series - конвертируем
                                         if isinstance(existing_val, pd.Series):
                                             existing_val = existing_val.iloc[0] if len(existing_val) > 0 else None
                                         elif isinstance(existing_val, (list, tuple, np.ndarray)):
-                                            existing_val = existing_val[0] if len(existing_val) > 0 else None
+                                            # Для списков берем весь список, а не первый элемент
+                                            if field in ('serp_top_urls', 'serp_lsi_phrases'):
+                                                # Для SERP полей сохраняем весь список
+                                                df_copy.at[idx, field] = existing_val
+                                                continue
+                                            else:
+                                                existing_val = existing_val[0] if len(existing_val) > 0 else None
                                         
                                         # Убеждаемся что это скалярное значение перед установкой
                                         if not isinstance(existing_val, (pd.Series, list, tuple, np.ndarray)):
@@ -267,11 +294,40 @@ class QuerySaver:
                 return val
             
             for _, row in df_copy.iterrows():
+                keyword = row.get('keyword')
+                
                 # SERP TOP URLs как JSON
                 serp_top_urls = None
                 if 'serp_top_urls' in df_copy.columns:
                     val = row.get('serp_top_urls')
-                    if val is not None and not (isinstance(val, float) and pd.isna(val)):
+                    
+                    # ВАЖНО: Проверяем, есть ли данные в БД для этого запроса
+                    existing_serp_data = None
+                    if keyword and keyword in existing_data_by_keyword:
+                        existing_row = existing_data_by_keyword[keyword]
+                        if 'serp_top_urls' in existing_row.index:
+                            existing_serp_data = existing_row.get('serp_top_urls')
+                            # Безопасное преобразование Series в скаляр
+                            if isinstance(existing_serp_data, pd.Series):
+                                existing_serp_data = existing_serp_data.iloc[0] if len(existing_serp_data) > 0 else None
+                    
+                    # Если val это пустой список или пустая строка, но в БД есть данные - используем данные из БД
+                    is_empty = False
+                    if val is None or (isinstance(val, float) and pd.isna(val)):
+                        is_empty = True
+                    elif isinstance(val, list) and len(val) == 0:
+                        is_empty = True
+                    elif isinstance(val, str) and val.strip() in ('', '[]', 'null', 'NULL', 'None'):
+                        is_empty = True
+                    
+                    if is_empty and existing_serp_data:
+                        # Пустое значение, но в БД есть данные - используем данные из БД
+                        if isinstance(existing_serp_data, str) and existing_serp_data.strip() not in ('', '[]', 'null', 'NULL', 'None'):
+                            serp_top_urls = existing_serp_data
+                        elif isinstance(existing_serp_data, (list, tuple)) and len(existing_serp_data) > 0:
+                            serp_top_urls = json.dumps(existing_serp_data, ensure_ascii=False)
+                    elif val is not None and not (isinstance(val, float) and pd.isna(val)):
+                        # Есть данные в DataFrame - используем их
                         if isinstance(val, str):
                             serp_top_urls = val
                         elif isinstance(val, list) and len(val) > 0:
@@ -290,6 +346,14 @@ class QuerySaver:
                                 serp_top_urls = json.dumps(normalized_urls, ensure_ascii=False)
                             else:
                                 serp_top_urls = json.dumps(val, ensure_ascii=False)
+                        elif isinstance(val, list) and len(val) == 0:
+                            # Пустой список - не сохраняем (оставляем NULL или данные из БД)
+                            if existing_serp_data:
+                                if isinstance(existing_serp_data, str) and existing_serp_data.strip() not in ('', '[]', 'null', 'NULL', 'None'):
+                                    serp_top_urls = existing_serp_data
+                                elif isinstance(existing_serp_data, (list, tuple)) and len(existing_serp_data) > 0:
+                                    serp_top_urls = json.dumps(existing_serp_data, ensure_ascii=False)
+                            # Иначе оставляем None (не сохраняем пустой список)
                         else:
                             serp_top_urls = json.dumps(val, ensure_ascii=False) if val else None
                 elif 'serp_urls' in df_copy.columns:

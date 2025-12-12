@@ -160,33 +160,59 @@ async def analyze_serp_stage(args, analyzer):
     )
     
     # Домены из SERP (для кластеризации) - ТОП-20
-    def extract_domains(query):
-        result = serp_dict.get(query, {})
-        documents = result.get('documents', [])
-        if not documents:
+    # ВАЖНО: Сначала проверяем, есть ли serp_top_urls из Master DB
+    if 'serp_top_urls' in analyzer.df.columns:
+        # Данные уже загружены из Master DB - создаем serp_urls из serp_top_urls
+        def extract_urls_from_top_urls(serp_top_urls):
+            """Извлекает список URL из serp_top_urls для кластеризации"""
+            if not serp_top_urls or not isinstance(serp_top_urls, list):
+                return []
+            
+            urls = []
+            for item in serp_top_urls[:20]:  # TOP-20
+                if isinstance(item, dict):
+                    url = item.get('url', '')
+                elif isinstance(item, str):
+                    url = item
+                else:
+                    continue
+                
+                if url:
+                    urls.append(url)
+            
+            return urls
+        
+        analyzer.df['serp_urls'] = analyzer.df['serp_top_urls'].apply(extract_urls_from_top_urls)
+        print_stage(analyzer, "   ✓ serp_urls созданы из serp_top_urls (Master DB)")
+    else:
+        # Данных из Master DB нет - извлекаем из serp_dict
+        def extract_domains(query):
+            result = serp_dict.get(query, {})
+            documents = result.get('documents', [])
+            if not documents:
+                return []
+            
+            # Если documents - строка (JSON из кэша), парсим её
+            if isinstance(documents, str):
+                import json
+                try:
+                    documents = json.loads(documents)
+                except:
+                    return []
+            
+            # Если documents - список словарей
+            if isinstance(documents, list) and len(documents) > 0:
+                # Проверяем тип первого элемента
+                if isinstance(documents[0], dict):
+                    # Берём только TOP-20 URL из документов (даже если их больше)
+                    return [doc.get('url', '') for doc in documents[:20] if doc.get('url')]
+                elif isinstance(documents[0], str):
+                    # Если это уже список URL
+                    return documents[:20]
+            
             return []
         
-        # Если documents - строка (JSON из кэша), парсим её
-        if isinstance(documents, str):
-            import json
-            try:
-                documents = json.loads(documents)
-            except:
-                return []
-        
-        # Если documents - список словарей
-        if isinstance(documents, list) and len(documents) > 0:
-            # Проверяем тип первого элемента
-            if isinstance(documents[0], dict):
-                # Берём только TOP-20 URL из документов (даже если их больше)
-                return [doc.get('url', '') for doc in documents[:20] if doc.get('url')]
-            elif isinstance(documents[0], str):
-                # Если это уже список URL
-                return documents[:20]
-        
-        return []
-    
-    analyzer.df['serp_urls'] = analyzer.df['keyword'].map(extract_domains)
+        analyzer.df['serp_urls'] = analyzer.df['keyword'].map(extract_domains)
     
     # Полные данные документов SERP (для экспорта с title, snippet и URL)
     # Проверяем: если serp_top_urls уже есть (из Master DB), используем его

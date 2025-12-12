@@ -333,44 +333,50 @@ async def classification_stage(args, analyzer):
     
     print_stage(analyzer, f"✓ Воронка классифицирована")
     
-    # Структурные паттерны
-    print_stage(analyzer, "🔄 Анализ структуры...")
-    analyzer.structure_clusterer = StructureClusterer()
-    analyzer.df = analyzer.structure_clusterer.extract_structural_features(analyzer.df)
+    # ОТКЛЮЧЕНО: Структурные паттерны
+    # print_stage(analyzer, "🔄 Анализ структуры...")
+    # analyzer.structure_clusterer = StructureClusterer()
+    # analyzer.df = analyzer.structure_clusterer.extract_structural_features(analyzer.df)
     
-    # Целевые страницы
-    print_stage(analyzer, "🔄 Определение целевых страниц...")
-    analyzer.page_mapper = PageMapper()
+    # ОТКЛЮЧЕНО: Целевые страницы
+    # print_stage(analyzer, "🔄 Определение целевых страниц...")
+    # analyzer.page_mapper = PageMapper()
     
-    # Проверяем что DataFrame не пустой
-    if len(analyzer.df) == 0:
-        print_stage(analyzer, "⚠️  DataFrame пустой, пропускаем определение целевых страниц")
-        # Создаем пустые колонки для совместимости
+    # Создаем пустые колонки для совместимости (если их нет)
+    if 'target_page_type' not in analyzer.df.columns:
         analyzer.df['target_page_type'] = pd.Series(dtype=str)
+    if 'suggested_url' not in analyzer.df.columns:
         analyzer.df['suggested_url'] = pd.Series(dtype=str)
-    else:
-        # Используем apply вместо iterrows (в 5-10 раз быстрее)
-        def map_row_to_page(row):
-            page_info = analyzer.page_mapper.map_query_to_page(
-                row['keyword'],
-                intent=row.get('main_intent'),
-                has_brand=row.get('is_brand_query', False),
-                has_geo=row.get('has_geo', False),
-                funnel_stage=row.get('funnel_stage'),
-                brand=row.get('detected_brand'),
-                city=row.get('geo_city')
-            )
-            return pd.Series({
-                'target_page_type': page_info['target_page_type'],
-                'suggested_url': page_info['suggested_url']
-            })
-        
-        # Применяем векторизованно
-        page_results = analyzer.df.apply(map_row_to_page, axis=1)
-        analyzer.df['target_page_type'] = page_results['target_page_type']
-        analyzer.df['suggested_url'] = page_results['suggested_url']
-        
-        print_stage(analyzer, f"✓ Целевые страницы определены")
+    
+    # ОТКЛЮЧЕНО: Определение целевых страниц
+    # if len(analyzer.df) == 0:
+    #     print_stage(analyzer, "⚠️  DataFrame пустой, пропускаем определение целевых страниц")
+    #     # Создаем пустые колонки для совместимости
+    #     analyzer.df['target_page_type'] = pd.Series(dtype=str)
+    #     analyzer.df['suggested_url'] = pd.Series(dtype=str)
+    # else:
+    #     # Используем apply вместо iterrows (в 5-10 раз быстрее)
+    #     def map_row_to_page(row):
+    #         page_info = analyzer.page_mapper.map_query_to_page(
+    #             row['keyword'],
+    #             intent=row.get('main_intent'),
+    #             has_brand=row.get('is_brand_query', False),
+    #             has_geo=row.get('has_geo', False),
+    #             funnel_stage=row.get('funnel_stage'),
+    #             brand=row.get('detected_brand'),
+    #             city=row.get('geo_city')
+    #         )
+    #         return pd.Series({
+    #             'target_page_type': page_info['target_page_type'],
+    #             'suggested_url': page_info['suggested_url']
+    #         })
+    #     
+    #     # Применяем векторизованно
+    #     page_results = analyzer.df.apply(map_row_to_page, axis=1)
+    #     analyzer.df['target_page_type'] = page_results['target_page_type']
+    #     analyzer.df['suggested_url'] = page_results['suggested_url']
+    #     
+    #     print_stage(analyzer, f"✓ Целевые страницы определены")
     
     # Обновляем интенты в БД (если они были скорректированы)
     if changed_count > 0 and hasattr(analyzer, 'current_group') and analyzer.current_group:

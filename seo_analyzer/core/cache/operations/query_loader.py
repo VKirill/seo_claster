@@ -87,6 +87,13 @@ class QueryLoader:
         
         # Нормализуем serp_top_urls в единый формат
         if 'serp_top_urls' in df.columns:
+            # Диагностика ДО нормализации
+            before_normalization = df['serp_top_urls'].copy()
+            non_null_before = before_normalization.notna().sum()
+            non_empty_str_before = before_normalization.apply(
+                lambda x: isinstance(x, str) and x.strip() not in ('', 'null', 'NULL', 'None', '[]')
+            ).sum()
+            
             def normalize_serp_urls(val):
                 """Нормализует SERP URLs в единый формат"""
                 # Обработка NULL/NaN значений
@@ -99,10 +106,20 @@ class QueryLoader:
             
             df['serp_top_urls'] = df['serp_top_urls'].apply(normalize_serp_urls)
             
-            # Диагностика нормализации
+            # Диагностика ПОСЛЕ нормализации
             serp_with_urls = df['serp_top_urls'].apply(lambda x: isinstance(x, list) and len(x) > 0).sum()
             serp_empty = len(df) - serp_with_urls
             serp_null_count = df['serp_top_urls'].isna().sum() if 'serp_top_urls' in df.columns else 0
+            
+            # Дополнительная диагностика: проверяем примеры данных
+            if serp_with_urls == 0 and non_empty_str_before > 0:
+                # Показываем примеры данных, которые не нормализовались
+                examples = before_normalization[before_normalization.notna()].head(3)
+                print(f"   ⚠️  Проблема нормализации: {non_empty_str_before} непустых строк в БД, но 0 после нормализации")
+                for idx, example in examples.items():
+                    example_str = str(example)[:100] if len(str(example)) > 100 else str(example)
+                    print(f"      Пример из БД: {example_str}")
+            
             print(f"   ✓ SERP URLs: {serp_with_urls} запросов с URL, {serp_empty} без URL")
             if serp_null_count > 0:
                 print(f"   ⚠️  NULL значений: {serp_null_count}")

@@ -78,19 +78,28 @@ class MasterDBHandler:
                         conn.close()
                         return None  # Данных нет - загрузим заново
                     
-                    # Проверяем наличие top_urls_json (может быть NULL или пустой строкой)
+                    # ВАЖНО: Проверяем наличие serp_top_urls - если пустой, собираем заново
+                    has_urls = False
                     if top_urls_json:
                         if isinstance(top_urls_json, str):
-                            if top_urls_json.strip() == '':
-                                top_urls_json = '[]'
+                            top_urls_str = top_urls_json.strip()
+                            if top_urls_str and top_urls_str not in ('', '[]', 'null', 'NULL', 'None'):
+                                # Парсим JSON чтобы проверить что там есть данные
+                                try:
+                                    top_urls = json.loads(top_urls_str)
+                                    if isinstance(top_urls, list) and len(top_urls) > 0:
+                                        has_urls = True
+                                except (json.JSONDecodeError, TypeError):
+                                    # Не JSON или ошибка парсинга - считаем что данных нет
+                                    has_urls = False
                     else:
-                        top_urls_json = '[]'
+                        # NULL или пустое значение
+                        has_urls = False
                     
-                    # Парсим JSON (даже если это пустой массив)
-                    try:
-                        top_urls = json.loads(top_urls_json) if isinstance(top_urls_json, str) else top_urls_json
-                    except (json.JSONDecodeError, TypeError):
-                        top_urls = []
+                    # Если нет URL - данные неполные, нужно загрузить заново через API
+                    if not has_urls:
+                        conn.close()
+                        return None  # serp_top_urls пустой - загрузим заново через XMLStock
                     
                     conn.close()
                     return self.formatter.format_serp_result(query, row)
@@ -125,19 +134,28 @@ class MasterDBHandler:
                     conn.close()
                     return None  # Данных нет - загрузим заново
                 
-                # Проверяем наличие top_urls_json (может быть NULL или пустой строкой)
+                # ВАЖНО: Проверяем наличие serp_top_urls - если пустой, собираем заново
+                has_urls = False
                 if top_urls_json:
                     if isinstance(top_urls_json, str):
-                        if top_urls_json.strip() == '':
-                            top_urls_json = '[]'
+                        top_urls_str = top_urls_json.strip()
+                        if top_urls_str and top_urls_str not in ('', '[]', 'null', 'NULL', 'None'):
+                            # Парсим JSON чтобы проверить что там есть данные
+                            try:
+                                top_urls = json.loads(top_urls_str)
+                                if isinstance(top_urls, list) and len(top_urls) > 0:
+                                    has_urls = True
+                            except (json.JSONDecodeError, TypeError):
+                                # Не JSON или ошибка парсинга - считаем что данных нет
+                                has_urls = False
                 else:
-                    top_urls_json = '[]'
+                    # NULL или пустое значение
+                    has_urls = False
                 
-                # Парсим JSON (даже если это пустой массив)
-                try:
-                    top_urls = json.loads(top_urls_json) if isinstance(top_urls_json, str) else top_urls_json
-                except (json.JSONDecodeError, TypeError):
-                    top_urls = []
+                # Если нет URL - данные неполные, нужно загрузить заново через API
+                if not has_urls:
+                    conn.close()
+                    return None  # serp_top_urls пустой - загрузим заново через XMLStock
                 
                 conn.close()
                 # Найдено в другой группе - используем данные
